@@ -1,0 +1,22 @@
+# rundll32.exe with suspicious arguments.
+# rundll32 abuse is a common LOLBin technique (architecture.md Section 2
+# threat model). A DLL passed with an unusual entry point or a temp-path DLL
+# is a classic sign. Tuned to medium so it contributes to the score without
+# firing alone (per NFR-1).
+title: rundll32 invoked with suspicious DLL path or entry point
+id: sentinel-0003
+status: experimental
+logsource:
+  category: process_create
+detection:
+  selection_image:
+    image|endswith: "rundll32.exe"
+  selection_args:
+    command_line|contains:
+      - "\\AppData\\Local\\Temp\\"
+      - "\\Temp\\"
+  condition: selection_image and selection_args
+level: medium
+description: >
+  rundll32.exe running a DLL out of a Temp directory is a common
+  living-off-the-land / dropper technique, not routine behavior.

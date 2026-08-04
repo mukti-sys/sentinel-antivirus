@@ -1,0 +1,42 @@
+# Sentinel configuration
+# Implements: config/settings.yaml per plan.md Section 3 (sample config)
+# Edit watched_folders / thresholds / API keys to suit your machine.
+
+watched_folders:
+  - "~/Downloads"
+  - "~/Desktop"
+  - "~/AppData/Local/Temp"
+
+# Detection thresholds — tuned conservatively (NFR-1: low false-positive bar).
+# These are the per-detector knobs feeding engine/scoring.py; see architecture.md
+# Section 5.4 (scoring is the main lever for false-positive tuning).
+thresholds:
+  cpu_sustained_percent: 85        # cryptomining heuristic (FR-2)
+  cpu_sustained_seconds: 60        # sustained high-CPU window
+  file_write_rate_per_min: 50      # ransomware mass-modification rate (FR-4)
+  file_entropy_alert: 7.5          # high-entropy write signal (FR-4)
+  failed_login_count: 5            # brute-force threshold (FR-3)
+  failed_login_window_seconds: 120 # brute-force time window
+
+# Threat intel — optional supplement to offline detection (NFR-7: only
+# hashes/IPs are sent; file content never leaves the machine). Empty keys
+# disable the lookups; core behavioral detection still works fully offline.
+intel:
+  virustotal_api_key: ""           # free tier: 4 requests/min (cache in events.db)
+  abusech_feed_refresh_hours: 12
+
+# DLL / Image-Load Handling — see architecture.md Section 5.3.
+# Publisher or hash-level allowlist, NOT folder-wide exclusions: a surgical
+# allowlist doesn't blind Sentinel to an entire directory the way a broad
+# exclusion would. No single weak signal (e.g. "unsigned DLL") may trigger a
+# response alone.
+dll_handling:
+  trusted_publishers:
+    - "Discord Inc."
+    - "MSI"
+  trusted_hashes: []               # add sha256 strings of known-good DLLs
+
+# Sentinel's own operational logging (FR-11) — separate from events.db.
+logging:
+  level: "INFO"
+  path: "data/sentinel.log"

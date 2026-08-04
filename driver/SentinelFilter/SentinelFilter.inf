@@ -1,0 +1,85 @@
+;;;
+;;; SentinelFilter.inf — Installation INF for SentinelFilter minifilter.
+;;;
+;;; Altitude: 328100 (FSFilter Anti-Virus range: 320000-329998)
+;;; LoadOrderGroup: FSFilter Anti-Virus
+;;;
+;;; Installation:
+;;;   rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 132 .\SentinelFilter.inf
+;;;
+;;; This creates the required Instances registry subkey that fltmc load expects.
+;;;
+;;; Copyright (c) 2026 Sentinel Project. All rights reserved.
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderName%
+DriverVer   = 08/02/2026,1.0.0.0
+CatalogFile = SentinelFilter.cat
+
+;;; -----------------------------------------------------------------------
+;;; DefaultInstall — used by rundll32 setupapi.dll,InstallHinfSection
+;;; -----------------------------------------------------------------------
+
+[DefaultInstall.NT$ARCH$]
+OptionDesc = %ServiceDescription%
+CopyFiles  = SentinelFilter.CopyFiles
+
+[DefaultInstall.NT$ARCH$.Services]
+AddService = %ServiceName%,,SentinelFilter.Service
+
+;;; -----------------------------------------------------------------------
+;;; Service definition
+;;; -----------------------------------------------------------------------
+
+[SentinelFilter.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\%DriverName%.sys
+Dependencies   = FltMgr
+ServiceType    = 2       ; SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 3       ; SERVICE_DEMAND_START (manual for dev/testing)
+ErrorControl   = 1       ; SERVICE_ERROR_NORMAL
+LoadOrderGroup = FSFilter Anti-Virus
+AddReg         = SentinelFilter.AddRegistry
+
+;;; -----------------------------------------------------------------------
+;;; Registry: Instances subkey (REQUIRED for fltmc load)
+;;; -----------------------------------------------------------------------
+
+[SentinelFilter.AddRegistry]
+; Default instance name
+HKR, "Instances", "DefaultInstance", 0x00000000, "SentinelFilter Instance"
+; Instance definition with altitude and flags
+HKR, "Instances\SentinelFilter Instance", "Altitude", 0x00000000, "328100"
+HKR, "Instances\SentinelFilter Instance", "Flags",    0x00010001, 0x0
+
+;;; -----------------------------------------------------------------------
+;;; File copy
+;;; -----------------------------------------------------------------------
+
+[SentinelFilter.CopyFiles]
+%DriverName%.sys
+
+[DestinationDirs]
+SentinelFilter.CopyFiles = 12  ; %windir%\System32\drivers
+
+[SourceDisksFiles]
+SentinelFilter.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+;;; -----------------------------------------------------------------------
+;;; Strings
+;;; -----------------------------------------------------------------------
+
+[Strings]
+ProviderName       = "Sentinel"
+ServiceName        = "SentinelFilter"
+ServiceDescription = "Sentinel file-level enforcement minifilter"
+DriverName         = "SentinelFilter"
+DiskName           = "Sentinel Filter Installation Disk"

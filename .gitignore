@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtualenv
+.venv/
+
+# Local runtime data — NEVER commit. data/quarantine/ may hold quarantined
+# (possibly malicious) files; data/ holds the local events DB and logs.
+data/
+sentinel/data/
+
+# Local settings overrides (keep the sample settings.yaml tracked)
+config/settings.local.yaml
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+
+# Internal planning docs
+prd.md
+plan.md
+phases.md
+PROGRESS.md
+architecture.md
+
+# VM screenshots and temp files
+vm_*.png
+*.zip
+check_cpu.ps1
+measure_busy.ps1
+sentinel-docs.zip
+
+# Events DB
+events.db
+events_verify.db

@@ -1,0 +1,22 @@
+# mshta.exe fetching or running remote/unusual content.
+# mshta is a LOLBin frequently used to execute HTA/JavaScript payloads,
+# often with an http(s) URL or a Temp path. Tuned to medium: some legitimate
+# software uses mshta, so it corroborates rather than fires alone (NFR-1).
+title: mshta executed with a URL or Temp-path payload
+id: sentinel-0006
+status: experimental
+logsource:
+  category: process_create
+detection:
+  selection_image:
+    image|endswith: "mshta.exe"
+  selection_args:
+    command_line|contains:
+      - "http://"
+      - "https://"
+      - "\\Temp\\"
+  condition: selection_image and selection_args
+level: medium
+description: >
+  mshta.exe running a remote URL or a Temp-path HTA is a common
+  malware-delivery technique abusing a legitimate Windows binary.

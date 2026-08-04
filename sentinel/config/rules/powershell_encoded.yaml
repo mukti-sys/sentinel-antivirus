@@ -1,0 +1,25 @@
+# PowerShell with an encoded command.
+# The `-enc` / `-EncodedCommand` switch hides a base64 payload — a hallmark
+# of fileless and macro-delivered malware (architecture.md Section 2:
+# fileless / living-off-the-land). Benign use exists but is uncommon on a
+# personal laptop; tuned to medium so it corroborates rather than fires alone.
+title: PowerShell launched with an encoded command
+id: sentinel-0004
+status: experimental
+logsource:
+  category: process_create
+detection:
+  selection_image:
+    image|endswith:
+      - "powershell.exe"
+      - "pwsh.exe"
+  selection_args:
+    command_line|contains:
+      - "-enc"
+      - "-encodedcommand"
+      - " -e "
+  condition: selection_image and selection_args
+level: medium
+description: >
+  PowerShell invoked with an encoded (-enc / -EncodedCommand) payload is a
+  common obfuscation technique in fileless attacks.

@@ -1,0 +1,28 @@
+# Unsigned DLL loaded into an unrelated process.
+# plan.md Section 5 sample rule (sentinel-0002). Cross-process DLL injection
+# is a real technique, but also used by legitimate overlay/RGB software, so
+# this rule contributes to the score rather than triggering a response by
+# itself. See architecture.md "DLL / Image-Load Handling": no single weak
+# signal (e.g. "unsigned DLL") may trigger a response alone.
+#
+# NOTE: the actual layered DLL logic (self-load vs cross-process, reflective
+# vs LoadLibrary, unsigned-needs-corroboration, reputation cache, publisher/
+# hash allowlist) is implemented in engine/scoring.py, which this rule feeds.
+# The `publisher_allowlist_check` key below documents intent; scoring.py
+# enforces it against config/settings.yaml's dll_handling allowlist.
+title: Unsigned DLL loaded into unrelated process
+id: sentinel-0002
+status: experimental
+logsource:
+  category: image_load
+detection:
+  selection:
+    signed: false
+    target_process_is_loader_process: false
+  publisher_allowlist_check: true
+  condition: selection and not publisher_allowlist_check
+level: medium
+description: >
+  Cross-process DLL injection is a real technique, but also used by
+  legitimate overlay/RGB software. This rule contributes to the score
+  rather than triggering a response by itself.

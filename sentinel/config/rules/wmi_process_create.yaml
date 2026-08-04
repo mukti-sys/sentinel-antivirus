@@ -1,0 +1,26 @@
+# WMI spawning a suspicious child process.
+# WMI abuse (wmiprvse.exe spawning powershell/cmd) is a classic lateral-
+# movement and fileless technique (architecture.md Section 2 threat model).
+# Tuned to high because wmiprvse spawning an interactive shell is almost
+# never legitimate on a single-user laptop.
+title: WMI service spawning a shell or script interpreter
+id: sentinel-0005
+status: experimental
+logsource:
+  category: process_create
+detection:
+  selection_parent:
+    parent_image|endswith: "wmiprvse.exe"
+  selection_child:
+    image|endswith:
+      - "powershell.exe"
+      - "pwsh.exe"
+      - "cmd.exe"
+      - "wscript.exe"
+      - "cscript.exe"
+      - "mshta.exe"
+  condition: selection_parent and selection_child
+level: high
+description: >
+  wmiprvse.exe (WMI) spawning a shell or script interpreter is a hallmark of
+  WMI-based lateral movement / fileless execution.

@@ -1,0 +1,11 @@
+pywin32>=306
+psutil>=5.9
+watchdog>=3.0
+yara-python>=4.3
+scikit-learn>=1.3
+pyyaml>=6.0
+requests>=2.31
+pefile>=2023.2.7
+pystray>=0.19
+Pillow>=10.0
+numpy>=1.24

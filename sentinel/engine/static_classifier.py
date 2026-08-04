@@ -1,0 +1,457 @@
+"""Static classifier — hash lookup (VirusTotal) + local PE-feature fallback
+model on new files (FR-5, architecture.md Section 5.3).
+
+Implements phases.md Phase 2:
+    static_classifier.py: VirusTotal hash lookup on file arrival + local
+    PE-feature fallback model (EMBER-trained)
+
+Design:
+- Consumes ``file_write`` events (new files arriving in watched folders).
+- Hashes the file (SHA-256, read-only) and looks it up via the VT client.
+- **vt_positive** signal (weight 50) when VT flags the hash as malicious.
+- When VT is disabled or returns unknown, falls back to a local PE-feature
+  model: extracts lightweight features from the PE header (section count,
+  entropy, imports, signature status, suspicious section names) and scores
+  them via a scikit-learn ``IsolationForest``.
+- **vt_unknown_suspicious_pe** signal (weight 15) when the PE model flags
+  an unknown file as suspicious — a weak signal that corroborates other
+  detectors rather than triggering a response alone (15 < threshold 80).
+
+Non-negotiables (architecture.md, prd.md):
+- Allow-first: never blocks execution (NFR-2). Only emits signals into
+  scoring.py.
+- Offline: core PE-feature detection works without VT (NFR-7, prd.md
+  "core behavioral detection must work fully offline").
+- No file content leaves the machine — only hashes (NFR-7).
+- Cache-first: never re-lookups a hash already in the VT cache (plan.md
+  FAQ).
+- Graceful degradation: file not found, access denied, non-PE file → no
+  crash, no signal.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import math
+import threading
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pefile
+try:
+    import yara
+    _YARA_AVAILABLE = True
+except ImportError:
+    _YARA_AVAILABLE = False
+from sklearn.ensemble import IsolationForest
+
+from sentinel.engine.schema import Event
+from sentinel.engine.scoring import Signal
+from sentinel.intel.virustotal_client import VirusTotalClient
+
+logger = logging.getLogger(__name__)
+
+# PE signature: "MZ" header (first two bytes of a Windows executable).
+_MZ_MAGIC = b"MZ"
+
+# Section names that are suspicious when found in a PE (packers, injectors,
+# custom sections). Not exhaustive — a refinement target for FP tuning.
+_SUSPICIOUS_SECTION_NAMES = frozenset({
+    ".ndata", ".packed", "UPX0", "UPX1", "UPX2", ".themida", ".vmp0",
+    ".vmp1", ".aspack", ".adata", ".petite",
+})
+
+# Isolation Forest threshold: the contamination parameter (expected fraction
+# of outliers). Conservative — a lower value means fewer anomalies flagged.
+_CONTAMINATION = 0.05
+
+# ---------------------------------------------------------------------------
+# Feature extraction
+# ---------------------------------------------------------------------------
+
+def _file_entropy(data: bytes) -> float:
+    """Shannon entropy in bits/byte for a byte string."""
+    if not data:
+        return 0.0
+    counts = Counter(data)
+    length = len(data)
+    entropy = -sum(
+        (c / length) * math.log2(c / length)
+        for c in counts.values()
+        if c > 0
+    )
+    # Avoid returning -0.0 (mathematically correct but confusing in logs).
+    return entropy if entropy else 0.0
+
+
+@dataclass(frozen=True)
+class PEFeatures:
+    """Lightweight PE features extracted from the file header.
+
+    Designed to be cheap to compute (no full disassembly, no YARA scans)
+    and meaningful enough for an Isolation Forest anomaly score. Modeled
+    after the EMBER feature set (architecture.md: "EMBER-trained") but
+    much smaller — just the features that matter most for a first-pass
+    triage.
+    """
+    file_size: int
+    num_sections: int
+    entry_point: int
+    file_entropy: float
+    has_debug: bool
+    has_signature: bool            # embedded Authenticode signature present
+    num_imports: int
+    num_exports: int
+    suspicious_section_count: int  # sections with packer/injector names
+    avg_section_entropy: float
+    max_section_entropy: float
+    min_section_raw_size: int      # tiny sections can indicate packing
+
+    def to_vector(self) -> list[float]:
+        """Convert to a flat numeric vector for the model."""
+        return [
+            float(self.file_size),
+            float(self.num_sections),
+            float(self.entry_point),
+            self.file_entropy,
+            1.0 if self.has_debug else 0.0,
+            1.0 if self.has_signature else 0.0,
+            float(self.num_imports),
+            float(self.num_exports),
+            float(self.suspicious_section_count),
+            self.avg_section_entropy,
+            self.max_section_entropy,
+            float(self.min_section_raw_size),
+        ]
+
+
+def extract_pe_features(
+    file_path: str | Path, data: bytes | None = None,
+) -> PEFeatures | None:
+    """Extract PE features from a file. Returns None if not a PE or on
+    any error (graceful degradation — non-PE files are common in watched
+    folders).
+
+    If ``data`` is provided the file is not re-read from disk (avoids
+    redundant I/O when the caller already hashed the file).
+    """
+    path = Path(file_path)
+
+    if data is None:
+        if not path.is_file():
+            return None
+        try:
+            data = path.read_bytes()
+        except (OSError, PermissionError):
+            return None
+
+    if len(data) < 2 or data[:2] != _MZ_MAGIC:
+        return None
+
+    try:
+        pe = pefile.PE(data=data, fast_load=True)
+    except pefile.PEFormatError:
+        return None
+
+    # Parse imports/exports (not loaded by fast_load). pefile may raise
+    # PEFormatError or other parse errors on corrupt/truncated directories;
+    # partial parse is fine — we work with what we get.
+    try:
+        pe.parse_data_directories(
+            directories=[
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"],
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DEBUG"],
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"],
+            ]
+        )
+    except (pefile.PEFormatError, AttributeError, ValueError, KeyError):
+        pass  # partial parse is fine; we work with what we get
+
+    sections = pe.sections or []
+    section_entropies = [s.get_entropy() for s in sections]
+    section_raw_sizes = [s.SizeOfRawData for s in sections]
+    suspicious_names = sum(
+        1 for s in sections
+        if s.Name.rstrip(b"\x00").decode("ascii", errors="replace").strip()
+        in _SUSPICIOUS_SECTION_NAMES
+    )
+
+    num_imports = 0
+    if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+        num_imports = sum(
+            len(entry.imports) for entry in pe.DIRECTORY_ENTRY_IMPORT
+        )
+
+    num_exports = 0
+    if hasattr(pe, "DIRECTORY_ENTRY_EXPORT"):
+        num_exports = len(pe.DIRECTORY_ENTRY_EXPORT.symbols)
+
+    has_debug = hasattr(pe, "DIRECTORY_ENTRY_DEBUG") and bool(
+        pe.DIRECTORY_ENTRY_DEBUG
+    )
+    has_signature = hasattr(pe, "DIRECTORY_ENTRY_SECURITY") and bool(
+        pe.DIRECTORY_ENTRY_SECURITY
+    )
+
+    features = PEFeatures(
+        file_size=len(data),
+        num_sections=len(sections),
+        entry_point=pe.OPTIONAL_HEADER.AddressOfEntryPoint if pe.OPTIONAL_HEADER else 0,
+        file_entropy=_file_entropy(data),
+        has_debug=has_debug,
+        has_signature=has_signature,
+        num_imports=num_imports,
+        num_exports=num_exports,
+        suspicious_section_count=suspicious_names,
+        avg_section_entropy=(
+            sum(section_entropies) / len(section_entropies)
+            if section_entropies else 0.0
+        ),
+        max_section_entropy=max(section_entropies) if section_entropies else 0.0,
+        min_section_raw_size=min(section_raw_sizes) if section_raw_sizes else 0,
+    )
+    pe.close()
+    return features
+
+
+# ---------------------------------------------------------------------------
+# PE feature model (Isolation Forest)
+# ---------------------------------------------------------------------------
+
+class PEFeatureModel:
+    """Lightweight anomaly detector over PE features.
+
+    Uses an Isolation Forest (scikit-learn) trained on a small set of
+    "normal" PE feature vectors. Unknown PEs that look abnormal score as
+    outliers → ``vt_unknown_suspicious_pe`` signal.
+
+    The model is trained lazily on the first call (or can be pre-fitted
+    with ``fit()``). If no training data is provided, a built-in baseline
+    of typical Windows PE features is used (conservative — tuned to
+    minimize false positives on common software).
+    """
+
+    # Built-in baseline: feature vectors of typical, benign Windows PEs.
+    # These represent the "normal" distribution the Isolation Forest learns.
+    # Each row: [file_size, num_sections, entry_point, file_entropy,
+    #            has_debug, has_signature, num_imports, num_exports,
+    #            suspicious_section_count, avg_section_entropy,
+    #            max_section_entropy, min_section_raw_size]
+    _BASELINE = [
+        # notepad.exe-like
+        [201728, 6, 0x1000, 6.1, 1, 1, 85, 0, 0, 5.8, 6.5, 512],
+        # calc.exe-like
+        [120320, 5, 0x2000, 5.9, 1, 1, 42, 0, 0, 5.5, 6.2, 512],
+        # explorer.exe-like
+        [4500000, 8, 0x3000, 6.4, 1, 1, 320, 5, 0, 6.0, 6.8, 1024],
+        # chrome.exe-like
+        [2900000, 7, 0x1000, 6.3, 1, 1, 200, 10, 0, 5.9, 6.6, 4096],
+        # python.exe-like
+        [100864, 5, 0x1000, 5.7, 1, 1, 35, 0, 0, 5.2, 6.0, 512],
+        # typical installer
+        [8500000, 9, 0x1000, 7.0, 0, 1, 50, 0, 0, 6.5, 7.2, 2048],
+        # small utility
+        [45056, 4, 0x1000, 5.4, 0, 0, 20, 0, 0, 4.8, 5.5, 512],
+        # .NET exe
+        [15360, 3, 0x2000, 4.5, 1, 1, 5, 0, 0, 3.2, 4.8, 512],
+        # large app
+        [12000000, 10, 0x1000, 6.5, 1, 1, 450, 20, 0, 6.2, 6.9, 4096],
+        # svchost-like
+        [51200, 5, 0x1000, 5.8, 1, 1, 30, 0, 0, 5.3, 6.1, 512],
+    ]
+
+    def __init__(self, contamination: float = _CONTAMINATION) -> None:
+        self._model = IsolationForest(
+            contamination=contamination,
+            n_estimators=100,
+            random_state=42,
+        )
+        self._fitted = False
+        self._lock = threading.Lock()
+
+    def fit(self, feature_vectors: list[list[float]] | None = None) -> None:
+        """Train the model. Uses the built-in baseline if no data provided."""
+        with self._lock:
+            data = feature_vectors if feature_vectors else self._BASELINE
+            self._model.fit(np.array(data))
+            self._fitted = True
+
+    def _ensure_fitted(self) -> None:
+        """Thread-safe lazy fitting: train on first use if not yet fitted."""
+        if not self._fitted:
+            self.fit()
+
+    def is_suspicious(self, features: PEFeatures) -> bool:
+        """True if the PE features look anomalous (outlier)."""
+        self._ensure_fitted()
+        vec = np.array([features.to_vector()])
+        # IsolationForest.predict: -1 = outlier, 1 = inlier.
+        return self._model.predict(vec)[0] == -1
+
+    def anomaly_score(self, features: PEFeatures) -> float:
+        """Raw anomaly score (lower = more anomalous). For observability."""
+        self._ensure_fitted()
+        vec = np.array([features.to_vector()])
+        return float(self._model.score_samples(vec)[0])
+
+
+# ---------------------------------------------------------------------------
+# The classifier
+# ---------------------------------------------------------------------------
+
+def _read_and_hash(path: str | Path) -> tuple[str, bytes] | None:
+    """Read a file and return (sha256_hex, raw_bytes). Returns None on
+    any error. Reading once avoids redundant I/O between hashing and PE
+    feature extraction."""
+    try:
+        data = Path(path).read_bytes()
+    except (OSError, PermissionError):
+        return None
+    sha256 = hashlib.sha256(data).hexdigest()
+    return sha256, data
+
+
+class StaticClassifier:
+    """Classifies new files via VT hash lookup + local PE-feature model.
+
+    Consumes file_write events from the bus, checks the file's SHA-256
+    against VT, and falls back to the PE anomaly model when VT is
+    unavailable or returns "unknown". Emits signals into scoring.py —
+    never blocks or quarantines.
+    """
+
+    def __init__(
+        self,
+        vt_client: VirusTotalClient | None = None,
+        pe_model: PEFeatureModel | None = None,
+        yara_rules_dir: str | Path | None = None,
+    ) -> None:
+        self.vt = vt_client
+        self.pe_model = pe_model or PEFeatureModel()
+        self._checked_hashes: set[str] = set()  # dedup: don't re-emit
+        self._lock = threading.Lock()  # thread-safe (architecture.md §8)
+        self._yara_rules = None
+        if _YARA_AVAILABLE:
+            self._yara_rules = self._load_yara_rules(yara_rules_dir)
+
+    def _load_yara_rules(self, rules_dir: str | Path | None = None) -> object | None:
+        """Compile all .yar files from the rules directory."""
+        if not _YARA_AVAILABLE:
+            return None
+        if rules_dir is None:
+            rules_dir = Path(__file__).parent.parent / "config" / "rules"
+        rules_dir = Path(rules_dir)
+        yar_files = list(rules_dir.glob("*.yar"))
+        if not yar_files:
+            logger.warning("yara_scanner: no .yar files found in %s", rules_dir)
+            return None
+        try:
+            filepaths = {f.stem: str(f) for f in yar_files}
+            compiled = yara.compile(filepaths=filepaths)  # type: ignore[attr-defined]
+            logger.info("yara_scanner: compiled %d rule file(s) from %s", len(yar_files), rules_dir)
+            return compiled
+        except Exception as exc:  # pragma: no cover
+            logger.error("yara_scanner: failed to compile rules: %s", exc)
+            return None
+
+    def _yara_scan(self, data: bytes, file_name: str) -> list[str]:
+        """Scan bytes against compiled YARA rules. Returns list of matching rule names."""
+        if self._yara_rules is None:
+            return []
+        try:
+            matches = self._yara_rules.match(data=data)  # type: ignore[union-attr]
+            return [m.rule for m in matches]
+        except Exception as exc:  # pragma: no cover
+            logger.debug("yara_scanner: scan error for %s: %s", file_name, exc)
+            return []
+
+    def classify_file_event(self, event: Event) -> list[Signal]:
+        """Examine a file_write event; return signals for the file.
+
+        Returns an empty list for non-file-write events, benign files,
+        files that have already been checked, or on any error.
+        """
+        if event.event_type != "file_write" or event.source != "fs":
+            return []
+
+        path = event.image_path or event.extra.get("path")
+        if not path:
+            return []
+
+        file_path = Path(path)
+        if not file_path.is_file():
+            return []
+
+        result = _read_and_hash(file_path)
+        if result is None:
+            return []
+        sha256, file_data = result
+
+        with self._lock:
+            if sha256 in self._checked_hashes:
+                return []
+            self._checked_hashes.add(sha256)
+
+        signals: list[Signal] = []
+        subject = f"file:{sha256[:16]}"
+
+        # --- YARA content scan (runs on ALL files, not just PEs) ---
+        yara_hits = self._yara_scan(file_data, file_path.name)
+        for rule_name in yara_hits:
+            logger.warning("YARA MATCH: rule '%s' matched %s", rule_name, file_path.name)
+            signals.append(Signal(
+                kind="yara_match",
+                subject=subject,
+                engine="yara_scanner",
+                reason=f"YARA rule '{rule_name}' matched {file_path.name} ({sha256[:16]}…)",
+            ))
+        if yara_hits:
+            return signals  # YARA is high-confidence; skip further checks
+        vt_verdict = None
+        if self.vt is not None:
+            vt_verdict = self.vt.lookup(sha256)
+            if vt_verdict is not None and vt_verdict.verdict == "malicious":
+                signals.append(Signal(
+                    kind="vt_positive",
+                    subject=subject,
+                    engine="static_classifier",
+                    reason=(
+                        f"VirusTotal: {vt_verdict.positives}/{vt_verdict.total} "
+                        f"detections for {file_path.name} "
+                        f"({sha256[:16]}…)"
+                    ),
+                ))
+                return signals  # strong signal; no need for PE fallback
+
+        # --- PE-feature fallback (offline detection) ---
+        # Only run when VT is disabled or returned unknown/clean.
+        if vt_verdict is not None and vt_verdict.verdict == "clean":
+            return signals  # VT says clean — trust it, skip PE model
+
+        pe_features = extract_pe_features(file_path, data=file_data)
+        if pe_features is not None and self.pe_model.is_suspicious(pe_features):
+            score = self.pe_model.anomaly_score(pe_features)
+            signals.append(Signal(
+                kind="vt_unknown_suspicious_pe",
+                subject=subject,
+                engine="static_classifier",
+                reason=(
+                    f"suspicious PE features in {file_path.name} "
+                    f"(anomaly_score={score:.3f}, "
+                    f"sections={pe_features.num_sections}, "
+                    f"entropy={pe_features.file_entropy:.2f}, "
+                    f"imports={pe_features.num_imports}, "
+                    f"signed={pe_features.has_signature}, "
+                    f"suspicious_sections={pe_features.suspicious_section_count})"
+                ),
+            ))
+
+        return signals
+
+    def clear_hash(self, sha256: str) -> None:
+        """Remove a hash from the dedup set (e.g. after re-scan request)."""
+        self._checked_hashes.discard(sha256.lower())

@@ -1,0 +1,19 @@
+# Suspicious PowerShell spawned by an Office app.
+# plan.md Section 4 sample rule (sentinel-0001). Office spawning PowerShell
+# is a classic macro-malware / LOLBin pattern, not normal user behavior.
+title: Suspicious PowerShell spawned by Office app
+id: sentinel-0001
+status: experimental
+logsource:
+  category: process_create
+detection:
+  selection:
+    parent_image|endswith:
+      - "WINWORD.EXE"
+      - "EXCEL.EXE"
+    image|endswith: "powershell.exe"
+  condition: selection
+level: high
+description: >
+  Office applications spawning PowerShell is a classic
+  macro-malware / LOLBin pattern, not normal user behavior.
