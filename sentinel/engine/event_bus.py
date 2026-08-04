@@ -230,7 +230,10 @@ class EventBus:
         self._queue.task_done()
 
     # ------------------------------------------------------------------ #
-    # Introspection — used by tests and the Phase 1 DoD spot-check
+    # Introspection — used by tests and the Phase 1 DoD spot-check.
+    # NOTE: `where` is interpolated via f-string, NOT parameterized.
+    # This is safe because callers are internal test code, never untrusted
+    # user input. Do NOT expose these methods to external / web input.
     # ------------------------------------------------------------------ #
     def count(self, where: str = "", params: tuple = ()) -> int:
         with self._lock:

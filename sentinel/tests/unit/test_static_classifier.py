@@ -382,12 +382,33 @@ class TestEICARHarness:
         b"ANTIVIRUS-TEST-FILE!$H+H*"
     )
 
-    def test_eicar_vt_positive(self, tmp_path):
+    def test_eicar_yara_match_short_circuits(self, tmp_path):
+        """The bundled eicar.yar rule matches the EICAR string directly, and
+        classify_file_event treats YARA as high-confidence: it returns the
+        yara_match signal without ever calling out to VT. This locks in the
+        short-circuit behavior added in static_classifier.py (see the
+        "YARA is high-confidence; skip further checks" comment)."""
+        f = tmp_path / "eicar.com"
+        f.write_bytes(self.EICAR)
+        vt = _mock_vt_client("malicious", positives=55, total=70)
+        cls = StaticClassifier(vt_client=vt)
+
+        sigs = cls.classify_file_event(_file_write_event(str(f)))
+        assert len(sigs) == 1
+        assert sigs[0].kind == "yara_match"
+        vt.lookup.assert_not_called()
+
+    def test_eicar_vt_positive_when_yara_disabled(self, tmp_path):
+        """With no .yar files loaded (empty rules dir), classification falls
+        through to VT — this is the vt_positive path the EICAR harness
+        originally exercised, isolated from the YARA short-circuit above."""
         f = tmp_path / "eicar.com"
         f.write_bytes(self.EICAR)
         eicar_hash = hashlib.sha256(self.EICAR).hexdigest()
         vt = _mock_vt_client("malicious", positives=55, total=70)
-        cls = StaticClassifier(vt_client=vt)
+        empty_rules_dir = tmp_path / "no_rules"
+        empty_rules_dir.mkdir()
+        cls = StaticClassifier(vt_client=vt, yara_rules_dir=empty_rules_dir)
 
         sigs = cls.classify_file_event(_file_write_event(str(f)))
         assert len(sigs) == 1
@@ -395,9 +416,13 @@ class TestEICARHarness:
         vt.lookup.assert_called_once_with(eicar_hash)
 
     def test_eicar_no_pe_signal_since_not_pe(self, tmp_path):
-        """EICAR is not a PE — the PE model should not fire."""
+        """EICAR is not a PE — the PE model should not fire. Isolated from
+        YARA (empty rules dir) and VT (offline) so this only exercises the
+        PE-feature fallback path."""
         f = tmp_path / "eicar.com"
         f.write_bytes(self.EICAR)
-        cls = StaticClassifier(vt_client=None)  # offline
+        empty_rules_dir = tmp_path / "no_rules"
+        empty_rules_dir.mkdir()
+        cls = StaticClassifier(vt_client=None, yara_rules_dir=empty_rules_dir)  # offline
         sigs = cls.classify_file_event(_file_write_event(str(f)))
         assert sigs == []  # not a PE, no VT → no signal
