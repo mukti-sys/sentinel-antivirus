@@ -179,6 +179,7 @@ def test_is_admin_returns_bool():
 
 @pytest.mark.skipif(not is_admin(), reason="requires elevated privileges for live ETW")
 def test_live_etw_capture(tmp_path):
+    pytest.importorskip("etw", reason="etw package not installed (optional)")
     """Live DoD check: with admin, a real ETW session captures a process
     launch. Runs only when the test suite is executed as Administrator."""
     import subprocess

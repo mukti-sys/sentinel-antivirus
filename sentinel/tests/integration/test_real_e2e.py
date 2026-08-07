@@ -111,9 +111,9 @@ class TestRealScoringThreshold:
             engine="yara_scanner",
             reason="YARA rule matched EICAR",
         )
-        scorer.add(signal)
+        scorer.add_signal(signal)
         assert scorer.should_respond("file:test"), \
-            f"Score {scorer.score('file:test')} should exceed threshold {scorer.threshold}"
+            f"Score {scorer.get('file:test').total} should exceed threshold {scorer.threshold}"
 
     def test_single_weak_signal_does_not_trigger(self):
         """A single weak signal should NOT trigger response."""
@@ -124,7 +124,7 @@ class TestRealScoringThreshold:
             engine="static_classifier",
             reason="suspicious PE",
         )
-        scorer.add(signal)
+        scorer.add_signal(signal)
         assert not scorer.should_respond("file:test"), \
             "Single weak signal should NOT trigger response"
 
@@ -146,7 +146,8 @@ class TestRealQuarantineLifecycle:
 
         # 3. Quarantine the file — this ACTUALLY moves it
         record = store.add(
-            original_path=original_path,
+            source_path=original_path,
+            subject=f"file:{EICAR_SHA256[:16]}",
             reason="YARA: EICAR_Test_File matched",
             score=85.0,
             source_signals=["yara_match"],
@@ -184,7 +185,8 @@ class TestRealQuarantineLifecycle:
         db_path = tmp_path / "quarantine_del.db"
         store = QuarantineStore(db_path=str(db_path), quarantine_dir=str(quarantine_dir))
         record = store.add(
-            original_path=str(eicar_file),
+            source_path=str(eicar_file),
+            subject=f"file:{EICAR_SHA256[:16]}",
             reason="YARA: EICAR detected",
             score=85.0,
             source_signals=["yara_match"],
@@ -228,18 +230,19 @@ class TestRealEndToEndPipeline:
         # --- Step 3: Score (REAL) ---
         scorer = Scorer()
         for sig in signals:
-            scorer.add(sig)
+            scorer.add_signal(sig)
         subject = signals[0].subject
         assert scorer.should_respond(subject), \
-            f"Score {scorer.score(subject)} did not exceed threshold"
+            f"Score {scorer.get(subject).total} did not exceed threshold"
 
         # --- Step 4: Quarantine (REAL) ---
         db_path = tmp_path / "pipeline.db"
         store = QuarantineStore(db_path=str(db_path), quarantine_dir=str(quarantine_dir))
         record = store.add(
-            original_path=str(eicar_file),
+            source_path=str(eicar_file),
+            subject=subject,
             reason=signals[0].reason,
-            score=scorer.score(subject),
+            score=scorer.get(subject).total,
             source_signals=[s.kind for s in signals],
         )
 
