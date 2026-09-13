@@ -51,15 +51,13 @@ jobs:
 
   build-driver:
     name: Build Kernel Driver & C Tests (x64)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
-        with:
-          vs-version: '[17.0,18.0)'
 
       - name: Install Windows Driver Kit (WDK 26100)
         shell: powershell
