@@ -31,10 +31,16 @@ architecture.md
 # VM screenshots and temp files
 vm_*.png
 *.zip
+*.exe
+*.pfx
 check_cpu.ps1
 measure_busy.ps1
 sentinel-docs.zip
+vm_cmd.ps1
+test_static_classifier*.py
+.aider*
 
 # Events DB
 events.db
 events_verify.db
+

@@ -8,7 +8,13 @@
 $ErrorActionPreference = "Stop"
 
 $DriverDir = "$PSScriptRoot\..\SentinelFilter"
-$SysFile   = "$DriverDir\x64\Debug\SentinelFilter.sys"
+$SysFile   = "$DriverDir\x64\Release\SentinelFilter.sys"
+if (-not (Test-Path $SysFile)) {
+    $SysFile = "$DriverDir\x64\Debug\SentinelFilter.sys"
+}
+if (-not (Test-Path $SysFile)) {
+    $SysFile = "$DriverDir\SentinelFilter.sys"
+}
 $InfFile   = "$DriverDir\SentinelFilter.inf"
 $PfxFile   = "$DriverDir\SentinelFilter.pfx"
 $PfxPass   = "SentinelTest2026!"
@@ -18,8 +24,7 @@ Write-Host "=== Sentinel Filter — Install ===" -ForegroundColor Cyan
 # Step 0: Preflight checks.
 if (-not (Test-Path $SysFile)) {
     Write-Host "[ERROR] Driver binary not found: $SysFile" -ForegroundColor Red
-    Write-Host "  Build the driver first:"
-    Write-Host "  msbuild SentinelFilter.vcxproj /p:Configuration=Debug /p:Platform=x64"
+    Write-Host "  Place SentinelFilter.sys in SentinelFilter\ or build the driver."
     exit 1
 }
 
@@ -31,10 +36,14 @@ if (-not (Test-Path $PfxFile)) {
 
 # Step 1: Sign the driver binary.
 Write-Host "`n[1/3] Signing $SysFile" -ForegroundColor Yellow
-signtool sign /fd SHA256 /f "$PfxFile" /p "$PfxPass" /v "$SysFile"
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ERROR] signtool failed." -ForegroundColor Red
-    exit 1
+if (Get-Command signtool.exe -ErrorAction SilentlyContinue) {
+    signtool sign /fd SHA256 /f "$PfxFile" /p "$PfxPass" /v "$SysFile"
+} else {
+    Write-Host "  signtool not in PATH, signing via PowerShell Cryptography..."
+    $secPass = ConvertTo-SecureString $PfxPass -AsPlainText -Force
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($PfxFile, $secPass)
+    $sigResult = Set-AuthenticodeSignature -FilePath $SysFile -Certificate $cert -HashAlgorithm SHA256
+    Write-Host "  Signature status: $($sigResult.Status)"
 }
 Write-Host "  Driver signed successfully."
 

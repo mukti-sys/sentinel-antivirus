@@ -48,3 +48,63 @@ jobs:
       - name: Run real end-to-end integration tests
         run: |
           python -m pytest sentinel/tests/integration/test_real_e2e.py -v --tb=long
+
+  build-driver:
+    name: Build Kernel Driver & C Tests (x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows Driver Kit (WDK 26100)
+        shell: powershell
+        run: |
+          Write-Host "Downloading WDK Build 26100 installer..."
+          $wdkUrl = "https://download.microsoft.com/download/41fb59c2-1723-45f9-a270-96b73ad58233/KIT_BUNDLE_WDK_MEDIACREATION/wdksetup.exe"
+          $installerPath = "$env:TEMP\wdksetup.exe"
+          Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
+
+          Write-Host "Installing WDK silently..."
+          $proc = Start-Process -FilePath $installerPath -ArgumentList "/features + /q" -PassThru -Wait
+          Write-Host "WDK installer exit code: $($proc.ExitCode)"
+
+          Write-Host "Configuring WDK MSBuild integration for VS2022..."
+          $vsixPath = "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\WDK.vsix"
+          if (Test-Path $vsixPath) {
+              $extractPath = "$env:TEMP\wdk_vsix"
+              Expand-Archive -Path $vsixPath -DestinationPath $extractPath -Force
+              
+              $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170"
+              if (Test-Path "$extractPath\`$MSBuild\Microsoft\VC\v170") {
+                  Copy-Item -Path "$extractPath\`$MSBuild\Microsoft\VC\v170\*" -Destination $vsPath -Recurse -Force
+                  Write-Host "WDK targets successfully copied to VS2022 MSBuild!"
+              }
+          } else {
+              Write-Host "[WARNING] WDK.vsix not found at $vsixPath"
+          }
+
+      - name: Compile and Run C Unit Tests (test_blocklist)
+        shell: cmd
+        run: |
+          cd driver\test
+          cl.exe /nologo /W4 test_blocklist.c ..\SentinelFilter\blocklist.c /I..\SentinelFilter /Fe:test_blocklist.exe
+          test_blocklist.exe
+
+      - name: Build SentinelFilter.sys (Release x64)
+        shell: cmd
+        run: |
+          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:Inf2Cat=Off /v:m
+
+      - name: Upload SentinelFilter Driver Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SentinelFilter-driver-x64
+          path: |
+            driver/SentinelFilter/x64/Release/SentinelFilter.sys
+            driver/SentinelFilter/SentinelFilter.inf
+            driver/scripts/install_driver.ps1
+            driver/scripts/setup_signing.ps1
+            driver/test/test_blocklist.exe
