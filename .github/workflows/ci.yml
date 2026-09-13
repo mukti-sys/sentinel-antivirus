@@ -143,7 +143,7 @@ jobs:
         shell: cmd
         run: |
           msbuild -version
-          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:Inf2Cat=Off /p:VisualStudioVersion=17.0 /v:n
+          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:EnableInf2Cat=false /p:Inf2Cat=false /p:EnableInfVerif=false /p:InfVerif=false /p:VisualStudioVersion=17.0 /v:n
           IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
 
       - name: Verify Driver Binary Exists

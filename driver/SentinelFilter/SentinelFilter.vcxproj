@@ -61,10 +61,17 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
 
+  <PropertyGroup>
+    <EnableInf2Cat>false</EnableInf2Cat>
+    <Inf2CatOption>false</Inf2CatOption>
+    <InfVerifOption>false</InfVerifOption>
+    <EnableInfVerif>false</EnableInfVerif>
+    <SignMode>Off</SignMode>
+  </PropertyGroup>
+
   <!-- Compiler settings -->
   <ItemDefinitionGroup>
     <ClCompile>
-      <PreprocessorDefinitions>_KERNEL_MODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -95,7 +102,7 @@
 
   <!-- INF file for driver installation -->
   <ItemGroup>
-    <Inf Include="SentinelFilter.inf" />
+    <None Include="SentinelFilter.inf" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
