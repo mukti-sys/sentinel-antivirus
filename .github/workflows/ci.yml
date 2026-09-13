@@ -58,6 +58,8 @@ jobs:
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
 
       - name: Install Windows Driver Kit (WDK 26100)
         shell: powershell
@@ -71,66 +73,80 @@ jobs:
           $proc = Start-Process -FilePath $installerPath -ArgumentList "/features + /q" -PassThru -Wait
           Write-Host "WDK installer exit code: $($proc.ExitCode)"
 
-          Write-Host "Configuring WDK MSBuild integration for VS2022..."
-          $vc170 = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170"
-          $toolsetDest = "$vc170\Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0"
-          New-Item -ItemType Directory -Path $toolsetDest -Force | Out-Null
-          New-Item -ItemType Directory -Path "$vc170\BuildCustomizations" -Force | Out-Null
-
-          # 1. Search in Windows Kits 10
+          Write-Host "Configuring WDK MSBuild integration..."
           $kitRoot = "C:\Program Files (x86)\Windows Kits\10"
+
+          # 1. Extract WDK toolsets and build files to a staging directory
+          $stagingDir = "$env:TEMP\wdk_staging"
+          New-Item -ItemType Directory -Path "$stagingDir\toolset" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$stagingDir\customizations" -Force | Out-Null
+
+          # Search in Windows Kits 10 root
           Get-ChildItem -Path $kitRoot -Recurse -Directory -Filter "WindowsKernelModeDriver10.0" -ErrorAction SilentlyContinue | ForEach-Object {
               Write-Host "Found toolset in KitRoot: $($_.FullName)"
-              Copy-Item -Path "$($_.FullName)\*" -Destination $toolsetDest -Recurse -Force
+              Copy-Item -Path "$($_.FullName)\*" -Destination "$stagingDir\toolset" -Recurse -Force
           }
           if (Test-Path "$kitRoot\build") {
-              Copy-Item -Path "$kitRoot\build\*" -Destination "$vc170\BuildCustomizations" -Recurse -Force
+              Copy-Item -Path "$kitRoot\build\*" -Destination "$stagingDir\customizations" -Recurse -Force
           }
 
-          # 2. Search in WDK.vsix
+          # Search in WDK.vsix
           $vsixPath = "$kitRoot\Vsix\VS2022\WDK.vsix"
           if (Test-Path $vsixPath) {
-              Write-Host "Found WDK.vsix at $vsixPath"
+              Write-Host "Extracting WDK.vsix at $vsixPath"
               $extractPath = "$env:TEMP\wdk_vsix"
               Expand-Archive -Path $vsixPath -DestinationPath $extractPath -Force
               Get-ChildItem -Path $extractPath -Recurse -Directory -Filter "WindowsKernelModeDriver10.0" -ErrorAction SilentlyContinue | ForEach-Object {
                   Write-Host "Found toolset in VSIX: $($_.FullName)"
-                  Copy-Item -Path "$($_.FullName)\*" -Destination $toolsetDest -Recurse -Force
+                  Copy-Item -Path "$($_.FullName)\*" -Destination "$stagingDir\toolset" -Recurse -Force
               }
               Get-ChildItem -Path $extractPath -Recurse -Directory -Filter "BuildCustomizations" -ErrorAction SilentlyContinue | ForEach-Object {
                   Write-Host "Found BuildCustomizations in VSIX: $($_.FullName)"
-                  Copy-Item -Path "$($_.FullName)\*" -Destination "$vc170\BuildCustomizations" -Recurse -Force
+                  Copy-Item -Path "$($_.FullName)\*" -Destination "$stagingDir\customizations" -Recurse -Force
               }
           }
 
-          $installedToolsets = Get-ChildItem "$vc170\Platforms\x64\PlatformToolsets" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-          Write-Host "Available x64 toolsets in VS2022: $($installedToolsets -join ', ')"
+          # 2. Duplicate task DLLs (17.0 -> 18.0) so any VisualStudioVersion will find its task assembly
+          Get-ChildItem -Path $kitRoot -Recurse -Filter "Microsoft.DriverKit.Build.Tasks.*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Found task DLL: $($_.FullName)"
+              $dest18 = Join-Path $_.DirectoryName "Microsoft.DriverKit.Build.Tasks.18.0.dll"
+              if (-not (Test-Path $dest18)) {
+                  Copy-Item $_.FullName $dest18 -Force
+                  Write-Host "Created fallback task DLL: $dest18"
+              }
+          }
+
+          # 3. Deploy to ALL Visual Studio instances found on system
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPaths = @()
+          if (Test-Path $vswhere) {
+              $vsPaths = & $vswhere -all -property installationPath
+          }
+          $vsPaths += "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+          $vsPaths = $vsPaths | Select-Object -Unique
+
+          foreach ($vsPath in $vsPaths) {
+              if (Test-Path $vsPath) {
+                  Write-Host "Deploying WDK MSBuild files to: $vsPath"
+                  Get-ChildItem -Path "$vsPath\MSBuild\Microsoft\VC" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                      $vcDir = $_.FullName
+                      $toolsetDest = "$vcDir\Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0"
+                      $customDest = "$vcDir\BuildCustomizations"
+                      New-Item -ItemType Directory -Path $toolsetDest -Force | Out-Null
+                      New-Item -ItemType Directory -Path $customDest -Force | Out-Null
+                      Copy-Item -Path "$stagingDir\toolset\*" -Destination $toolsetDest -Recurse -Force
+                      Copy-Item -Path "$stagingDir\customizations\*" -Destination $customDest -Recurse -Force
+                      Write-Host "  Configured $vcDir"
+                  }
+              }
+          }
 
       - name: Build SentinelFilter.sys (Release x64)
         shell: cmd
         run: |
-          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:Inf2Cat=Off /v:n > driver\build.log 2>&1
-          type driver\build.log
-
-      - name: Publish Build Diagnostics to Step Summary
-        if: always()
-        shell: powershell
-        run: |
-          $summary = "# Driver Build Diagnostic Summary`n"
-          if (Test-Path "driver\build.log") {
-              $log = Get-Content "driver\build.log" -Tail 150 | Out-String
-              $summary += "### MSBuild Output:`n``````n$log`n``````n"
-          } else {
-              $summary += "No build.log found.`n"
-          }
-          [System.IO.File]::WriteAllText($env:GITHUB_STEP_SUMMARY, $summary, [System.Text.Encoding]::UTF8)
-
-      - name: Upload Build Log Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: driver-build-log
-          path: driver/build.log
+          msbuild -version
+          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:Inf2Cat=Off /p:VisualStudioVersion=17.0 /v:n
+          IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
 
       - name: Verify Driver Binary Exists
         shell: powershell
