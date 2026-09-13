@@ -74,14 +74,38 @@ jobs:
           Write-Host "Configuring WDK MSBuild integration for VS2022..."
           $vsixPath = "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\WDK.vsix"
           if (Test-Path $vsixPath) {
+              Write-Host "Found WDK.vsix at $vsixPath"
+              # 1. Attempt official VSIXInstaller
+              $vsixInstaller = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe"
+              if (Test-Path $vsixInstaller) {
+                  Write-Host "Running VSIXInstaller..."
+                  $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/quiet /admin `"$vsixPath`"" -PassThru -Wait
+                  Write-Host "VSIXInstaller exit code: $($p.ExitCode)"
+              }
+              
+              # 2. Extract and manually copy targets (guaranteed fallback)
               $extractPath = "$env:TEMP\wdk_vsix"
               Expand-Archive -Path $vsixPath -DestinationPath $extractPath -Force
               
-              $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170"
-              if (Test-Path "$extractPath\`$MSBuild\Microsoft\VC\v170") {
-                  Copy-Item -Path "$extractPath\`$MSBuild\Microsoft\VC\v170\*" -Destination $vsPath -Recurse -Force
-                  Write-Host "WDK targets successfully copied to VS2022 MSBuild!"
+              $sourceRoot = Join-Path $extractPath '$MSBuild'
+              if (Test-Path $sourceRoot) {
+                  Write-Host "Found `$MSBuild in extracted VSIX"
+                  $destRoots = @(
+                      "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild",
+                      "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\MSBuild",
+                      "C:\Program Files (x86)\MSBuild"
+                  )
+                  foreach ($dest in $destRoots) {
+                      if (Test-Path $dest) {
+                          Copy-Item -Path "$sourceRoot\*" -Destination $dest -Recurse -Force
+                          Write-Host "Copied targets to $dest"
+                      }
+                  }
               }
+              
+              # Verify platform toolset exists
+              $toolsetCheck = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild" -Recurse -Filter "*WindowsKernelModeDriver10.0*" -ErrorAction SilentlyContinue
+              Write-Host "Found toolset items: $($toolsetCheck.Count)"
           } else {
               Write-Host "[WARNING] WDK.vsix not found at $vsixPath"
           }
