@@ -129,10 +129,32 @@ class QuarantineStore:
 
     @staticmethod
     def _strip_execute(path: Path) -> None:
-        """Remove execute and write permissions from a file (NTFS deny)."""
-        current = path.stat().st_mode
-        path.chmod(current & ~0o111)  # remove all execute bits
-        path.chmod(path.stat().st_mode & ~0o222)  # remove write bits too
+        """Remove execute and write permissions from a quarantined file.
+
+        On POSIX systems, removes execute and write permission bits.
+        On Windows, marks read-only and applies an explicit deny-execute ACE
+        via icacls (Deny execute to Everyone). Primary kernel pre-execution
+        blocking is enforced by the SentinelFilter minifilter driver (Phase 4).
+        """
+        try:
+            current = path.stat().st_mode
+            path.chmod(current & ~0o111)  # remove POSIX execute bits
+            path.chmod(path.stat().st_mode & ~0o222)  # remove write bits (read-only)
+        except Exception:
+            pass
+
+        import sys
+        if sys.platform == "win32":
+            try:
+                import subprocess
+                subprocess.run(
+                    ["icacls", str(path), "/deny", "*S-1-1-0:(X)"],
+                    capture_output=True,
+                    timeout=2.0,
+                    check=False,
+                )
+            except Exception as exc:
+                logger.debug("icacls deny execute failed: %s", exc)
 
     def add(
         self,
@@ -287,6 +309,20 @@ class QuarantineStore:
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(src), str(dest))
+            # Restore normal permissions on the restored file
+            try:
+                import stat, sys
+                dest.chmod(dest.stat().st_mode | stat.S_IWRITE | stat.S_IEXEC)
+                if sys.platform == "win32":
+                    import subprocess
+                    subprocess.run(
+                        ["icacls", str(dest), "/remove:d", "*S-1-1-0"],
+                        capture_output=True,
+                        timeout=2.0,
+                        check=False,
+                    )
+            except Exception:
+                pass
             # Leave the quarantined copy for audit; it will be removed on
             # delete() or can be pruned later.
         except (OSError, PermissionError) as exc:

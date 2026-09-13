@@ -236,7 +236,9 @@ class PEFeatureModel:
     """
 
     # Built-in baseline: feature vectors of typical, benign Windows PEs.
-    # These represent the "normal" distribution the Isolation Forest learns.
+    # NOTE: This is a small synthetic baseline for development/testing scaffolding.
+    # TODO: In production, load pre-trained model weights trained on the full
+    # EMBER 1.1M PE dataset. YARA and VirusTotal serve as primary high-confidence filters.
     # Each row: [file_size, num_sections, entry_point, file_entropy,
     #            has_debug, has_signature, num_imports, num_exports,
     #            suspicious_section_count, avg_section_entropy,

@@ -63,6 +63,7 @@ class SentinelOrchestrator:
         self._sensors = []
         self._bus = None
         self._kernel_bridge = None  # Phase 4: kernel enforcement bridge
+        self._consumer = None       # Detection & response pipeline consumer
 
     def start(self) -> None:
         """Start all sensors and the detection loop."""
@@ -95,6 +96,9 @@ class SentinelOrchestrator:
 
         # Phase 4: Connect to kernel minifilter (graceful degradation).
         self._init_kernel_bridge()
+
+        # Start detection consumer pipeline (wire sensors -> engines -> response).
+        self._init_detection_consumer()
 
         # Start sensors (each in its own thread per architecture.md Section 8).
         self._start_sensors()
@@ -178,8 +182,43 @@ class SentinelOrchestrator:
                           "running in user-mode-only mode", exc)
             self._kernel_bridge = None
 
+    def _init_detection_consumer(self) -> None:
+        """Initialize and start the detection consumer pipeline."""
+        try:
+            from sentinel.engine.consumer import DetectionConsumer
+            from sentinel.response.notifier import Notifier
+            from sentinel.response.quarantine_store import QuarantineStore
+
+            data_dir = Path(__file__).resolve().parent / "data"
+            quarantine_dir = data_dir / "quarantine"
+            quarantine_store = QuarantineStore(
+                db_path=data_dir / "quarantine.db",
+                quarantine_dir=quarantine_dir,
+            )
+            notifier = Notifier()
+
+            self._consumer = DetectionConsumer(
+                bus=self._bus,
+                quarantine_store=quarantine_store,
+                kernel_bridge=self._kernel_bridge,
+                notifier=notifier,
+            )
+            self._consumer.start()
+            logger.info("detection consumer pipeline started")
+        except Exception as exc:
+            logger.exception("detection consumer failed to start: %s", exc)
+            self._consumer = None
+
     def _cleanup(self) -> None:
-        """Stop all sensors, disconnect bridge, and close the bus."""
+        """Stop consumer, sensors, disconnect bridge, and close the bus."""
+        # Stop detection consumer first.
+        if self._consumer:
+            try:
+                self._consumer.stop()
+                logger.info("detection consumer stopped")
+            except Exception as exc:
+                logger.warning("consumer stop error: %s", exc)
+
         for sensor in self._sensors:
             try:
                 sensor.stop()
