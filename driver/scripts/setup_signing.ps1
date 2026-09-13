@@ -1,4 +1,4 @@
-# setup_signing.ps1 — Create test-signing certificate for SentinelFilter.
+# setup_signing.ps1 - Create test-signing certificate for SentinelFilter.
 #
 # Run as Administrator inside the VM.
 # Creates a self-signed code-signing certificate and installs it
@@ -12,7 +12,7 @@ $CertName = "CN=SentinelFilterTestCert"
 $PfxPath  = "$PSScriptRoot\..\SentinelFilter\SentinelFilter.pfx"
 $PfxPassword = ConvertTo-SecureString -String "SentinelTest2026!" -Force -AsPlainText
 
-Write-Host "=== Sentinel Filter — Test Certificate Setup ===" -ForegroundColor Cyan
+Write-Host "=== Sentinel Filter - Test Certificate Setup ===" -ForegroundColor Cyan
 
 # Step 1: Create self-signed code-signing certificate.
 Write-Host "`n[1/4] Creating self-signed certificate: $CertName" -ForegroundColor Yellow
@@ -54,5 +54,3 @@ Write-Host "  Installed into TrustedPublisher store"
 Write-Host "`n=== Certificate setup complete ===" -ForegroundColor Green
 Write-Host "Thumbprint: $($cert.Thumbprint)"
 Write-Host "PFX file:   $PfxPath"
-Write-Host "`nYou can now sign drivers with:"
-Write-Host "  signtool sign /fd SHA256 /f `"$PfxPath`" /p `"SentinelTest2026!`" SentinelFilter.sys"

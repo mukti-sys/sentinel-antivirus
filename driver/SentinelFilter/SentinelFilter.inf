@@ -1,5 +1,5 @@
 ;;;
-;;; SentinelFilter.inf — Installation INF for SentinelFilter minifilter.
+;;; SentinelFilter.inf - Installation INF for SentinelFilter minifilter.
 ;;;
 ;;; Altitude: 328100 (FSFilter Anti-Virus range: 320000-329998)
 ;;; LoadOrderGroup: FSFilter Anti-Virus
@@ -21,14 +21,21 @@ DriverVer   = 08/02/2026,1.0.0.0
 CatalogFile = SentinelFilter.cat
 
 ;;; -----------------------------------------------------------------------
-;;; DefaultInstall — used by rundll32 setupapi.dll,InstallHinfSection
+;;; DefaultInstall - used by rundll32 setupapi.dll,InstallHinfSection
 ;;; -----------------------------------------------------------------------
 
-[DefaultInstall.NT$ARCH$]
+[DefaultInstall]
 OptionDesc = %ServiceDescription%
 CopyFiles  = SentinelFilter.CopyFiles
 
-[DefaultInstall.NT$ARCH$.Services]
+[DefaultInstall.Services]
+AddService = %ServiceName%,,SentinelFilter.Service
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = SentinelFilter.CopyFiles
+
+[DefaultInstall.NTamd64.Services]
 AddService = %ServiceName%,,SentinelFilter.Service
 
 ;;; -----------------------------------------------------------------------

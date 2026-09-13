@@ -44,3 +44,11 @@ test_static_classifier*.py
 events.db
 events_verify.db
 
+# Driver build outputs
+x64/
+driver/**/x64/
+*.sys
+*.cer
+*.cat
+
+

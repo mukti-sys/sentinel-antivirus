@@ -1,4 +1,4 @@
-# install_driver.ps1 — Sign, install, and load SentinelFilter.
+# install_driver.ps1 - Sign, install, and load SentinelFilter.
 #
 # Run as Administrator inside the VM.
 # ALWAYS take a VM snapshot before running this.
@@ -19,7 +19,7 @@ $InfFile   = "$DriverDir\SentinelFilter.inf"
 $PfxFile   = "$DriverDir\SentinelFilter.pfx"
 $PfxPass   = "SentinelTest2026!"
 
-Write-Host "=== Sentinel Filter — Install ===" -ForegroundColor Cyan
+Write-Host "=== Sentinel Filter - Install ===" -ForegroundColor Cyan
 
 # Step 0: Preflight checks.
 if (-not (Test-Path $SysFile)) {
@@ -55,14 +55,23 @@ Copy-Item $SysFile "$env:SystemRoot\System32\drivers\SentinelFilter.sys" -Force
 rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 132 "$InfFile"
 Write-Host "  INF installed. Checking registry..."
 
-# Verify registry key was created.
-$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SentinelFilter\Instances"
-if (Test-Path $regPath) {
-    Write-Host "  Instances registry key: OK" -ForegroundColor Green
-} else {
-    Write-Host "  [WARNING] Instances key not found at $regPath" -ForegroundColor Yellow
-    Write-Host "  fltmc load may fail."
+# Verify registry key was created or configure directly.
+$svcPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SentinelFilter"
+$regPath = "$svcPath\Instances"
+if (-not (Test-Path $svcPath)) {
+    Write-Host "  Creating SentinelFilter service via sc.exe..."
+    sc.exe create SentinelFilter type= kernel start= demand binPath= "System32\drivers\SentinelFilter.sys" group= "FSFilter Anti-Virus" depend= FltMgr
 }
+if (-not (Test-Path $regPath)) {
+    Write-Host "  Configuring minifilter Instances registry entries..."
+    New-Item -Path $regPath -Force | Out-Null
+    Set-ItemProperty -Path $regPath -Name "DefaultInstance" -Value "SentinelFilter Instance"
+    $instPath = "$regPath\SentinelFilter Instance"
+    New-Item -Path $instPath -Force | Out-Null
+    Set-ItemProperty -Path $instPath -Name "Altitude" -Value "328100"
+    Set-ItemProperty -Path $instPath -Name "Flags" -Value 0 -Type DWord
+}
+Write-Host "  Instances registry key: OK" -ForegroundColor Green
 
 # Step 3: Load the minifilter.
 Write-Host "`n[3/3] Loading minifilter..." -ForegroundColor Yellow
