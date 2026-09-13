@@ -70,12 +70,17 @@ NTSTATUS SfPortMessage(
 /* Globals                                                                 */
 /* ----------------------------------------------------------------------- */
 
-PFLT_FILTER  g_FilterHandle   = NULL;
-PFLT_PORT    g_ServerPort      = NULL;
-PFLT_PORT    g_ClientPort      = NULL;  /* One client at a time. */
-BLOCKLIST    g_Blocklist;
-KSPIN_LOCK   g_BlocklistLock;
-ULONG        g_TotalBlocks     = 0;     /* Stat counter. */
+typedef struct _SENTINEL_SPINLOCK {
+    KSPIN_LOCK  Lock;
+    KIRQL       OldIrql;
+} SENTINEL_SPINLOCK;
+
+PFLT_FILTER        g_FilterHandle       = NULL;
+PFLT_PORT          g_ServerPort         = NULL;
+PFLT_PORT          g_ClientPort         = NULL;  /* One client at a time. */
+BLOCKLIST          g_Blocklist;
+SENTINEL_SPINLOCK  g_BlocklistLockCtx;
+ULONG              g_TotalBlocks        = 0;     /* Stat counter. */
 
 /* ----------------------------------------------------------------------- */
 /* Kernel alloc/free/lock/unlock for blocklist                             */
@@ -84,7 +89,7 @@ ULONG        g_TotalBlocks     = 0;     /* Stat counter. */
 static void* kernel_alloc(void *ctx, size_t size)
 {
     UNREFERENCED_PARAMETER(ctx);
-    return ExAllocatePool2(POOL_FLAG_NON_PAGED, size, SENTINEL_POOL_TAG);
+    return ExAllocatePoolWithTag(NonPagedPoolNx, size, SENTINEL_POOL_TAG);
 }
 
 static void kernel_free(void *ctx, void *ptr)
@@ -95,14 +100,14 @@ static void kernel_free(void *ctx, void *ptr)
 
 static void kernel_lock(void *ctx)
 {
-    KIRQL *oldIrql = (KIRQL *)ctx;
-    KeAcquireSpinLock(&g_BlocklistLock, oldIrql);
+    SENTINEL_SPINLOCK *lockCtx = (SENTINEL_SPINLOCK *)ctx;
+    KeAcquireSpinLock(&lockCtx->Lock, &lockCtx->OldIrql);
 }
 
 static void kernel_unlock(void *ctx)
 {
-    KIRQL *oldIrql = (KIRQL *)ctx;
-    KeReleaseSpinLock(&g_BlocklistLock, *oldIrql);
+    SENTINEL_SPINLOCK *lockCtx = (SENTINEL_SPINLOCK *)ctx;
+    KeReleaseSpinLock(&lockCtx->Lock, lockCtx->OldIrql);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -148,26 +153,17 @@ NTSTATUS DriverEntry(
 
     UNREFERENCED_PARAMETER(RegistryPath);
 
-    /* Initialize spinlock and blocklist. */
-    KeInitializeSpinLock(&g_BlocklistLock);
-
-    /* We pass a pointer to a KIRQL as the lock context.  The spinlock
-     * acquire/release pair stores/restores the old IRQL through it.
-     * IMPORTANT: this KIRQL is stored on the calling thread's stack via
-     * the callback — each call to blocklist_add/remove/contains has its
-     * own stack frame, so this is safe. We allocate it per-call in the
-     * actual lock function (see communication.c for the wrapper). */
+    /* Initialize spinlock context and blocklist.
+     * The spinlock and its saved IRQL are encapsulated in g_BlocklistLockCtx
+     * to avoid naked static locals and ensure clear lock context ownership. */
+    KeInitializeSpinLock(&g_BlocklistLockCtx.Lock);
+    g_BlocklistLockCtx.OldIrql = PASSIVE_LEVEL;
 
     {
-        /* For the global blocklist, we use a thread-local-style KIRQL.
-         * Since the blocklist lock/unlock are called in pairs within a
-         * single function scope, we use a static KIRQL here.  This is
-         * safe because SpinLock serializes access. */
-        static KIRQL s_OldIrql;
         int rc = blocklist_init(
             &g_Blocklist,
             kernel_alloc, kernel_free, NULL,
-            kernel_lock, kernel_unlock, &s_OldIrql);
+            kernel_lock, kernel_unlock, &g_BlocklistLockCtx);
         if (rc != BL_SUCCESS) {
             return STATUS_INSUFFICIENT_RESOURCES;
         }

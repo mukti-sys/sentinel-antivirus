@@ -13,7 +13,10 @@ Design (NFR-3 driven):
   truth for putting it back exactly where it came from (restore) or removing
   it permanently (confirm delete).
 - Execute permission is stripped on the quarantined copy (architecture.md
-  Section 5.5: "strip execute permission").
+  Section 5.5: "strip execute permission"). On Windows, this is enforced by
+  applying an explicit deny-execute ACE via icacls (Everyone:(X) deny) and
+  read-only attributes, paired with the SentinelFilter kernel minifilter
+  pre-execution blocklist; on POSIX systems, via chmod -x.
 - SHA-256 hash is computed and stored for traceability.
 - Source signals that led to the quarantine are stored as JSON for audit.
 - Nothing is auto-deleted. `delete()` only runs on an explicit user decision

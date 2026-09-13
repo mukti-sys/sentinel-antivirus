@@ -137,7 +137,7 @@ def test_live_loopback_connection_is_logged(tmp_path):
         rows = []
         while time.time() < deadline:
             rows = [
-                r for r in bus.recent(limit=50, where="source=?", params=("network",))
+                r for r in bus.recent(limit=500, where="source=?", params=("network",))
                 if r["extra"].get("remote_ip") == "127.0.0.1"
                 and r["extra"].get("dest_port") == port
             ]

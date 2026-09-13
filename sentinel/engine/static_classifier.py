@@ -223,21 +223,23 @@ def extract_pe_features(
 # ---------------------------------------------------------------------------
 
 class PEFeatureModel:
-    """Lightweight anomaly detector over PE features.
+    """Lightweight anomaly detector scaffolding over PE features.
 
-    Uses an Isolation Forest (scikit-learn) trained on a small set of
-    "normal" PE feature vectors. Unknown PEs that look abnormal score as
-    outliers → ``vt_unknown_suspicious_pe`` signal.
+    WARNING / SCAFFOLDING NOTICE:
+    The built-in `_BASELINE` below consists of synthetic reference vectors
+    used for development and unit testing scaffolding. It is NOT pre-trained
+    on the full EMBER 1.1M PE dataset. Real-world files will not be reliably
+    classified by this synthetic baseline alone. In production, pre-trained
+    serialized model weights (e.g. via `fit()` with EMBER-derived feature
+    matrices) should be loaded.
 
-    The model is trained lazily on the first call (or can be pre-fitted
-    with ``fit()``). If no training data is provided, a built-in baseline
-    of typical Windows PE features is used (conservative — tuned to
-    minimize false positives on common software).
+    Authoritative detection in Sentinel is provided by:
+    1. YARA signature scanning (instant high-confidence match)
+    2. VirusTotal cloud threat intelligence (authoritative hash lookup)
     """
 
-    # Built-in baseline: feature vectors of typical, benign Windows PEs.
-    # NOTE: This is a small synthetic baseline for development/testing scaffolding.
-    # TODO: In production, load pre-trained model weights trained on the full
+    # TODO: NOT REAL TRAINING DATA — development/testing scaffolding baseline only!
+    # In production, load pre-trained model weights trained on the full
     # EMBER 1.1M PE dataset. YARA and VirusTotal serve as primary high-confidence filters.
     # Each row: [file_size, num_sections, entry_point, file_entropy,
     #            has_debug, has_signature, num_imports, num_exports,

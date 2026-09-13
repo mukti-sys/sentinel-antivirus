@@ -133,6 +133,7 @@ class DetectionConsumer:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._responded_subjects: set[str] = set()
+        self._proc_start_times: dict[int, float] = {}
         self._last_cpu_sample = 0.0
 
     def start(self) -> None:
@@ -183,13 +184,27 @@ class DetectionConsumer:
 
         Returns all generated Signals.
         """
-        # 1. Handle process_exit — reset subject score to prevent PID recycling issues
-        if event.event_type == "process_exit" and event.pid is not None:
-            subj = f"pid:{event.pid}"
-            self.scorer.reset(subj)
-            self.cryptomining_heuristic.clear_cpu_flag(event.pid)
-            self._responded_subjects.discard(subj)
+        # 1. Handle process_exit / process_terminate — reset subject score to prevent PID recycling issues
+        if event.event_type in ("process_exit", "process_terminate") and event.pid is not None:
+            pid = event.pid
+            self.scorer.reset_pid(pid)
+            self.cryptomining_heuristic.clear_cpu_flag(pid)
+            self._proc_start_times.pop(pid, None)
+            prefix = f"pid:{pid}"
+            self._responded_subjects = {
+                s for s in self._responded_subjects
+                if not (s == prefix or s.startswith(prefix + ":"))
+            }
             return []
+
+        # Track start time if available
+        if event.pid is not None:
+            st = event.extra.get("create_time") or event.extra.get("process_start_time")
+            if st is not None and event.pid not in self._proc_start_times:
+                try:
+                    self._proc_start_times[event.pid] = float(st)
+                except (ValueError, TypeError):
+                    pass
 
         signals: list[Signal] = []
 
@@ -272,7 +287,7 @@ class DetectionConsumer:
         return signals
 
     def _periodic_checks(self, now: float) -> None:
-        """Run periodic sampling such as cryptomining CPU usage."""
+        """Run periodic sampling such as cryptomining CPU usage, signal decay, and subject eviction."""
         try:
             cpu_sigs = self.cryptomining_heuristic.sample_cpu(now=now)
             for sig in cpu_sigs:
@@ -283,6 +298,13 @@ class DetectionConsumer:
                         self._execute_response(sig.subject, sig, None)
         except Exception as exc:
             logger.debug("periodic check error: %s", exc)
+
+        # Decay aging signals and evict stale subjects (NFR-1 false-positive lever)
+        try:
+            self.scorer.decay(ttl_seconds=600.0, now=now)
+            self.scorer.evict_stale(max_age_seconds=3600.0, now=now)
+        except Exception as exc:
+            logger.debug("scorer decay error: %s", exc)
 
     def _execute_response(self, subject: str, sig: Signal, event: Event | None) -> None:
         """Execute autonomous response when score crosses threshold."""

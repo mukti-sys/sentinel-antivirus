@@ -94,11 +94,25 @@ class Signal:
     engine: str = "unknown"       # which engine produced it (observability)
     timestamp: float | None = None
 
+    def __post_init__(self) -> None:
+        if self.timestamp is None:
+            object.__setattr__(self, "timestamp", time.time())
+
     @property
     def effective_weight(self) -> float:
         if self.weight is not None:
             return self.weight
         return WEIGHTS.get(self.kind, 0.0)
+
+
+def format_pid_subject(pid: int, start_time: float | int | None = None) -> str:
+    """Format a process subject key.
+    When start_time is known, keys as 'pid:<pid>:<start_time>' to prevent PID
+    reuse collision. Otherwise falls back to 'pid:<pid>'.
+    """
+    if start_time is not None:
+        return f"pid:{pid}:{int(start_time)}"
+    return f"pid:{pid}"
 
 
 @dataclass
@@ -109,16 +123,20 @@ class SubjectScore:
     total: float = 0.0
     signals: list[Signal] = field(default_factory=list)
     dll_components: set[str] = field(default_factory=set)
+    created_at: float = field(default_factory=time.time)
+    last_updated: float = field(default_factory=time.time)
 
     def add(self, sig: Signal) -> None:
         self.signals.append(sig)
         self.total += sig.effective_weight
         if sig.kind.startswith("dll_"):
             self.dll_components.add(sig.kind)
+        self.last_updated = sig.timestamp if sig.timestamp is not None else time.time()
 
     @property
     def top_reasons(self) -> list[str]:
         return [f"{s.kind} ({s.effective_weight:.0f}): {s.reason}" for s in self.signals]
+
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +302,33 @@ class Scorer:
     """Aggregates signals per subject and decides whether the score crosses
     the response threshold. One Scorer for the whole process; every engine
     feeds it.
+
+    Supports time-decay of aging signals (NFR-1 false-positive suppression),
+    stale subject eviction, bounded memory footprint, and PID-safe reset.
     """
 
-    def __init__(self, threshold: float = 80.0) -> None:
+    def __init__(
+        self,
+        threshold: float = 80.0,
+        signal_ttl: float = 600.0,
+        max_subjects: int = 10000,
+    ) -> None:
         self.threshold = threshold
+        self.signal_ttl = signal_ttl
+        self.max_subjects = max_subjects
         self._subjects: dict[str, SubjectScore] = {}
         self._lock = __import__("threading").Lock()
 
     def add_signal(self, sig: Signal) -> SubjectScore:
         with self._lock:
+            # Enforce bounded capacity (evict oldest updated subject if full)
+            if len(self._subjects) >= self.max_subjects and sig.subject not in self._subjects:
+                oldest_key = min(
+                    self._subjects,
+                    key=lambda k: getattr(self._subjects[k], "last_updated", 0),
+                )
+                self._subjects.pop(oldest_key, None)
+
             subj = self._subjects.setdefault(sig.subject, SubjectScore(sig.subject))
             subj.add(sig)
             return subj
@@ -304,11 +340,13 @@ class Scorer:
         return last
 
     def get(self, subject: str) -> SubjectScore | None:
-        return self._subjects.get(subject)
+        with self._lock:
+            return self._subjects.get(subject)
 
     def crosses_threshold(self, subject: str) -> bool:
-        subj = self._subjects.get(subject)
-        return bool(subj and subj.total >= self.threshold)
+        with self._lock:
+            subj = self._subjects.get(subject)
+            return bool(subj and subj.total >= self.threshold)
 
     def should_respond(self, subject: str) -> bool:
         """The single decision point: respond only when the combined score
@@ -319,21 +357,88 @@ class Scorer:
         dll_abnormal_host), do NOT respond — those need corroboration from a
         non-DLL signal or a strong reflective signal.
         """
-        subj = self._subjects.get(subject)
-        if subj is None or subj.total < self.threshold:
-            return False
-        non_dll = [s for s in subj.signals if not s.kind.startswith("dll_")]
-        strong_dll = [s for s in subj.signals if s.kind == "dll_reflective"]
-        # Respond if there's a non-DLL corroborating signal OR a strong
-        # reflective-mapping signal. Weak-DLL-signals-only never responds.
-        return bool(non_dll or strong_dll)
+        with self._lock:
+            subj = self._subjects.get(subject)
+            if subj is None or subj.total < self.threshold:
+                return False
+            non_dll = [s for s in subj.signals if not s.kind.startswith("dll_")]
+            strong_dll = [s for s in subj.signals if s.kind == "dll_reflective"]
+            # Respond if there's a non-DLL corroborating signal OR a strong
+            # reflective-mapping signal. Weak-DLL-signals-only never responds.
+            return bool(non_dll or strong_dll)
 
     def reset(self, subject: str | None = None) -> None:
+        """Reset score for a subject, or all subjects if None.
+        If subject starts with 'pid:<id>', also clears 'pid:<id>:<start_time>'.
+        """
         with self._lock:
             if subject is None:
                 self._subjects.clear()
             else:
                 self._subjects.pop(subject, None)
+                if subject.startswith("pid:"):
+                    prefix = subject + ":"
+                    matching = [k for k in self._subjects if k.startswith(prefix)]
+                    for k in matching:
+                        self._subjects.pop(k, None)
+
+    def reset_pid(self, pid: int) -> None:
+        """Purge all scores associated with a process ID (clears both
+        'pid:<pid>' and 'pid:<pid>:<start_time>').
+        """
+        self.reset(f"pid:{pid}")
+
+    def decay(self, ttl_seconds: float | None = None, now: float | None = None) -> list[str]:
+        """Prune signals older than ttl_seconds from all subjects.
+        Recomputes total scores and deletes subjects that have no remaining signals.
+        Returns list of pruned subject keys.
+        """
+        ttl = ttl_seconds if ttl_seconds is not None else self.signal_ttl
+        now_ts = now if now is not None else time.time()
+        cutoff = now_ts - ttl
+        pruned_subjects = []
+
+        with self._lock:
+            dead_keys = []
+            for subj_key, subj in self._subjects.items():
+                active_signals = [
+                    s for s in subj.signals
+                    if s.timestamp is not None and s.timestamp >= cutoff
+                ]
+                if len(active_signals) != len(subj.signals):
+                    subj.signals = active_signals
+                    subj.total = sum(s.effective_weight for s in active_signals)
+                    subj.dll_components = {
+                        s.kind for s in active_signals if s.kind.startswith("dll_")
+                    }
+                    subj.last_updated = now_ts
+                if not subj.signals or subj.total <= 0:
+                    dead_keys.append(subj_key)
+
+            for k in dead_keys:
+                self._subjects.pop(k, None)
+                pruned_subjects.append(k)
+
+        return pruned_subjects
+
+    def evict_stale(self, max_age_seconds: float = 3600.0, now: float | None = None) -> int:
+        """Evict subjects that have not received any new signal in max_age_seconds."""
+        now_ts = now if now is not None else time.time()
+        cutoff = now_ts - max_age_seconds
+        evicted = 0
+
+        with self._lock:
+            dead_keys = [
+                k for k, subj in self._subjects.items()
+                if getattr(subj, "last_updated", getattr(subj, "created_at", 0)) < cutoff
+            ]
+            for k in dead_keys:
+                self._subjects.pop(k, None)
+                evicted += 1
+
+        return evicted
 
     def subjects(self) -> list[str]:
-        return list(self._subjects.keys())
+        with self._lock:
+            return list(self._subjects.keys())
+

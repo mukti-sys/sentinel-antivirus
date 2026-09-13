@@ -61,6 +61,14 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
 
+  <!--
+    Driver package verification settings:
+    Inf2Cat and InfVerif are disabled for local development and CI test builds
+    (which lack hardware EV code signing certificates).
+    TODO: For official release packaging and WHQL submission, re-enable Inf2Cat
+    and InfVerif (set to true), and change <None Include="SentinelFilter.inf" />
+    to <Inf Include="SentinelFilter.inf" /> to generate .cat catalog packages.
+  -->
   <PropertyGroup>
     <EnableInf2Cat>false</EnableInf2Cat>
     <Inf2CatOption>false</Inf2CatOption>
