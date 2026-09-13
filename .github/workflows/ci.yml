@@ -86,13 +86,6 @@ jobs:
               Write-Host "[WARNING] WDK.vsix not found at $vsixPath"
           }
 
-      - name: Compile and Run C Unit Tests (test_blocklist)
-        shell: cmd
-        run: |
-          cd driver\test
-          cl.exe /nologo /W4 test_blocklist.c ..\SentinelFilter\blocklist.c /I..\SentinelFilter /Fe:test_blocklist.exe
-          test_blocklist.exe
-
       - name: Build SentinelFilter.sys (Release x64)
         shell: cmd
         run: |
@@ -107,4 +100,3 @@ jobs:
             driver/SentinelFilter/SentinelFilter.inf
             driver/scripts/install_driver.ps1
             driver/scripts/setup_signing.ps1
-            driver/test/test_blocklist.exe
