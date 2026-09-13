@@ -74,8 +74,10 @@ class DetectionConsumer:
     ) -> None:
         self.bus = bus
         self.scorer = scorer or Scorer()
-        self.quarantine_store = quarantine_store or QuarantineStore()
         self.kernel_bridge = kernel_bridge
+        self.quarantine_store = quarantine_store or QuarantineStore(kernel_bridge=kernel_bridge)
+        if getattr(self.quarantine_store, "kernel_bridge", None) is None and kernel_bridge:
+            self.quarantine_store.kernel_bridge = kernel_bridge
         self.notifier = notifier or Notifier()
         self.auto_respond = auto_respond
 
@@ -335,6 +337,22 @@ class DetectionConsumer:
                 file_path = event.extra["path"]
 
         if file_path:
+            # Check if user previously restored this file (FP feedback)
+            if self.quarantine_store:
+                try:
+                    p = Path(file_path)
+                    if p.is_file():
+                        sha = self.quarantine_store._sha256_of(p)
+                        if self.quarantine_store.is_restored(sha):
+                            logger.info(
+                                "Skipping autonomous response for user-restored file %s (sha256=%s)",
+                                file_path,
+                                sha,
+                            )
+                            return
+                except Exception:
+                    pass
+
             qrec = self.quarantine_store.add(
                 source_path=str(file_path),
                 subject=subject,

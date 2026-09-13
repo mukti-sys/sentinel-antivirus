@@ -389,11 +389,13 @@ class TestEICARHarness:
         short-circuit behavior added in static_classifier.py (see the
         "YARA is high-confidence; skip further checks" comment)."""
         f = tmp_path / "eicar.com"
-        f.write_bytes(self.EICAR)
+        f.write_bytes(b"safe_test_placeholder")
+        eicar_hash = hashlib.sha256(self.EICAR).hexdigest()
         vt = _mock_vt_client("malicious", positives=55, total=70)
         cls = StaticClassifier(vt_client=vt)
 
-        sigs = cls.classify_file_event(_file_write_event(str(f)))
+        with patch("sentinel.engine.static_classifier._read_and_hash", return_value=(eicar_hash, self.EICAR)):
+            sigs = cls.classify_file_event(_file_write_event(str(f)))
         assert len(sigs) == 1
         assert sigs[0].kind == "yara_match"
         vt.lookup.assert_not_called()
@@ -403,14 +405,15 @@ class TestEICARHarness:
         through to VT — this is the vt_positive path the EICAR harness
         originally exercised, isolated from the YARA short-circuit above."""
         f = tmp_path / "eicar.com"
-        f.write_bytes(self.EICAR)
+        f.write_bytes(b"safe_test_placeholder")
         eicar_hash = hashlib.sha256(self.EICAR).hexdigest()
         vt = _mock_vt_client("malicious", positives=55, total=70)
         empty_rules_dir = tmp_path / "no_rules"
         empty_rules_dir.mkdir()
         cls = StaticClassifier(vt_client=vt, yara_rules_dir=empty_rules_dir)
 
-        sigs = cls.classify_file_event(_file_write_event(str(f)))
+        with patch("sentinel.engine.static_classifier._read_and_hash", return_value=(eicar_hash, self.EICAR)):
+            sigs = cls.classify_file_event(_file_write_event(str(f)))
         assert len(sigs) == 1
         assert sigs[0].kind == "vt_positive"
         vt.lookup.assert_called_once_with(eicar_hash)
@@ -420,9 +423,11 @@ class TestEICARHarness:
         YARA (empty rules dir) and VT (offline) so this only exercises the
         PE-feature fallback path."""
         f = tmp_path / "eicar.com"
-        f.write_bytes(self.EICAR)
+        f.write_bytes(b"safe_test_placeholder")
+        eicar_hash = hashlib.sha256(self.EICAR).hexdigest()
         empty_rules_dir = tmp_path / "no_rules"
         empty_rules_dir.mkdir()
         cls = StaticClassifier(vt_client=None, yara_rules_dir=empty_rules_dir)  # offline
-        sigs = cls.classify_file_event(_file_write_event(str(f)))
+        with patch("sentinel.engine.static_classifier._read_and_hash", return_value=(eicar_hash, self.EICAR)):
+            sigs = cls.classify_file_event(_file_write_event(str(f)))
         assert sigs == []  # not a PE, no VT → no signal

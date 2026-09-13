@@ -94,7 +94,9 @@ class QuarantineStore:
         self,
         db_path: str | Path | None = None,
         quarantine_dir: str | Path | None = None,
+        kernel_bridge: Any = None,
     ) -> None:
+        self.kernel_bridge = kernel_bridge
         self._db_path = Path(db_path) if db_path else (_DEFAULT_DIR / "quarantine.db")
         self._quarantine_dir = (
             Path(quarantine_dir) if quarantine_dir else (_DEFAULT_DIR / "quarantine")
@@ -182,9 +184,10 @@ class QuarantineStore:
         try:
             # Copy first so a backup exists even if something fails mid-way.
             shutil.copy2(str(src), str(dest))
-            self._strip_execute(dest)
-            # Remove the original.
+            # Remove the original immediately.
             src.unlink(missing_ok=True)
+            # Strip execute permissions on the isolated copy.
+            self._strip_execute(dest)
         except (OSError, PermissionError) as exc:
             logger.error("quarantine move failed for %s: %s", src, exc)
             if dest.exists():
@@ -263,6 +266,18 @@ class QuarantineStore:
                 ).fetchone()
             return row[0] if row else 0
 
+    def is_restored(self, sha256: str) -> bool:
+        """Check if a SHA-256 hash was marked RESTORED (FP feedback)."""
+        if not sha256:
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM quarantine WHERE sha256=? AND decision=?",
+                (sha256, RESTORED),
+            ).fetchone()
+        return row is not None
+
+
     def _to_record(self, row: sqlite3.Row) -> QuarantineRecord:
         signals = []
         try:
@@ -306,9 +321,17 @@ class QuarantineStore:
             logger.warning("restore: quarantined file missing %s", src)
             return None
 
+        # Unblock kernel driver first so destination is accessible
+        if self.kernel_bridge and rec.original_path:
+            try:
+                self.kernel_bridge.remove_block(rec.original_path)
+            except Exception as exc:
+                logger.debug("quarantine restore kernel unblock failed: %s", exc)
+
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dest))
+            # Copy data bytes cleanly without inheriting quarantined deny ACLs
+            shutil.copyfile(str(src), str(dest))
             # Restore normal permissions on the restored file
             try:
                 import stat, sys

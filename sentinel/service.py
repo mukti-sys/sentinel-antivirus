@@ -108,7 +108,9 @@ class SentinelOrchestrator:
         # FS sensor (no admin required).
         try:
             from sentinel.sensors.fs_sensor import FsSensor
-            fs = FsSensor(self._bus)
+            downloads = str(Path.home() / "Downloads")
+            desktop = str(Path.home() / "Desktop")
+            fs = FsSensor(self._bus, [downloads, desktop])
             fs.start()
             self._sensors.append(fs)
             logger.info("fs_sensor started")

@@ -186,8 +186,13 @@ class FsSensor:
     each sensor runs independently). Run `start()` then `join()`/`stop()`.
     """
 
-    def __init__(self, bus: EventBus, watched_folders: list[str]) -> None:
+    def __init__(self, bus: EventBus, watched_folders: list[str] | None = None) -> None:
         self._bus = bus
+        if watched_folders is None:
+            watched_folders = [
+                str(Path.home() / "Downloads"),
+                str(Path.home() / "Desktop"),
+            ]
         expanded = [os.path.expandvars(os.path.expanduser(f)) for f in watched_folders]
         self._watched = [str(f) for f in expanded if Path(f).exists()]
         missing = [f for f in expanded if not Path(f).exists()]
