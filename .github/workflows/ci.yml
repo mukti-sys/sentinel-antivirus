@@ -72,59 +72,65 @@ jobs:
           Write-Host "WDK installer exit code: $($proc.ExitCode)"
 
           Write-Host "Configuring WDK MSBuild integration for VS2022..."
-          $vsixPath = "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\WDK.vsix"
+          $vc170 = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170"
+          $toolsetDest = "$vc170\Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0"
+          New-Item -ItemType Directory -Path $toolsetDest -Force | Out-Null
+          New-Item -ItemType Directory -Path "$vc170\BuildCustomizations" -Force | Out-Null
+
+          # 1. Search in Windows Kits 10
+          $kitRoot = "C:\Program Files (x86)\Windows Kits\10"
+          Get-ChildItem -Path $kitRoot -Recurse -Directory -Filter "WindowsKernelModeDriver10.0" -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Found toolset in KitRoot: $($_.FullName)"
+              Copy-Item -Path "$($_.FullName)\*" -Destination $toolsetDest -Recurse -Force
+          }
+          if (Test-Path "$kitRoot\build") {
+              Copy-Item -Path "$kitRoot\build\*" -Destination "$vc170\BuildCustomizations" -Recurse -Force
+          }
+
+          # 2. Search in WDK.vsix
+          $vsixPath = "$kitRoot\Vsix\VS2022\WDK.vsix"
           if (Test-Path $vsixPath) {
               Write-Host "Found WDK.vsix at $vsixPath"
               $extractPath = "$env:TEMP\wdk_vsix"
               Expand-Archive -Path $vsixPath -DestinationPath $extractPath -Force
-              
-              $vc170 = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170"
-              
-              # Recursively find and copy BuildCustomizations
-              Get-ChildItem -Path $extractPath -Recurse -Directory -Filter "BuildCustomizations" | ForEach-Object {
-                  Write-Host "Found BuildCustomizations at $($_.FullName)"
-                  Copy-Item -Path "$($_.FullName)\*" -Destination "$vc170\BuildCustomizations" -Recurse -Force
-              }
-              
-              # Recursively find and copy PlatformToolsets\WindowsKernelModeDriver10.0
-              Get-ChildItem -Path $extractPath -Recurse -Directory -Filter "WindowsKernelModeDriver10.0" | ForEach-Object {
-                  Write-Host "Found toolset at $($_.FullName)"
-                  $toolsetDest = "$vc170\Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0"
-                  New-Item -ItemType Directory -Path $toolsetDest -Force | Out-Null
+              Get-ChildItem -Path $extractPath -Recurse -Directory -Filter "WindowsKernelModeDriver10.0" -ErrorAction SilentlyContinue | ForEach-Object {
+                  Write-Host "Found toolset in VSIX: $($_.FullName)"
                   Copy-Item -Path "$($_.FullName)\*" -Destination $toolsetDest -Recurse -Force
               }
-
-              # Also copy entire $MSBuild tree if present
-              $sourceRoot = Join-Path $extractPath '$MSBuild'
-              if (Test-Path $sourceRoot) {
-                  Copy-Item -Path "$sourceRoot\*" -Destination "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild" -Recurse -Force
+              Get-ChildItem -Path $extractPath -Recurse -Directory -Filter "BuildCustomizations" -ErrorAction SilentlyContinue | ForEach-Object {
+                  Write-Host "Found BuildCustomizations in VSIX: $($_.FullName)"
+                  Copy-Item -Path "$($_.FullName)\*" -Destination "$vc170\BuildCustomizations" -Recurse -Force
               }
-
-              $installedToolsets = Get-ChildItem "$vc170\Platforms\x64\PlatformToolsets" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-              Write-Host "Available x64 toolsets in VS2022: $($installedToolsets -join ', ')"
-          } else {
-              Write-Host "[WARNING] WDK.vsix not found at $vsixPath"
           }
 
+          $installedToolsets = Get-ChildItem "$vc170\Platforms\x64\PlatformToolsets" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+          Write-Host "Available x64 toolsets in VS2022: $($installedToolsets -join ', ')"
+
       - name: Build SentinelFilter.sys (Release x64)
-        shell: powershell
+        shell: cmd
         run: |
-          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:Inf2Cat=Off /fl /flp:logfile=build.log;verbosity=normal
-        continue-on-error: true
+          msbuild driver\SentinelFilter\SentinelFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:Inf2Cat=Off /v:n > driver\build.log 2>&1
+          type driver\build.log
 
       - name: Publish Build Diagnostics to Step Summary
         if: always()
         shell: powershell
         run: |
-          "# Driver Build Diagnostic Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          if (Test-Path "build.log") {
-              "### MSBuild Log (tail 100 lines):" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-              "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-              Get-Content "build.log" -Tail 100 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-              "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $summary = "# Driver Build Diagnostic Summary`n"
+          if (Test-Path "driver\build.log") {
+              $log = Get-Content "driver\build.log" -Tail 150 | Out-String
+              $summary += "### MSBuild Output:`n``````n$log`n``````n"
           } else {
-              "No build.log file was generated." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              $summary += "No build.log found.`n"
           }
+          [System.IO.File]::WriteAllText($env:GITHUB_STEP_SUMMARY, $summary, [System.Text.Encoding]::UTF8)
+
+      - name: Upload Build Log Artifact on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-build-log
+          path: driver/build.log
 
       - name: Verify Driver Binary Exists
         shell: powershell
