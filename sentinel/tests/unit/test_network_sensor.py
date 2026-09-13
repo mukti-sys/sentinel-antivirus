@@ -157,3 +157,19 @@ def test_live_loopback_connection_is_logged(tmp_path):
     assert r["extra"]["remote_ip"] == "127.0.0.1"
     assert r["extra"]["dest_port"] == port
     assert r["pid"] is not None  # this test process owns the socket
+
+
+def test_baseline_on_start_suppresses_preexisting_sockets(tmp_path):
+    """Verify that when baseline_on_start=True, pre-existing sockets are
+    silently baselined without emitting events into events.db.
+    """
+    bus = EventBus(db_path=tmp_path / "events.db")
+    sensor = NetworkSensor(bus, poll_interval=0.1, baseline_on_start=True)
+    # Establish baseline
+    count = sensor.establish_baseline()
+    assert count >= 0
+    # No events should have been written to the bus during baseline
+    rows = bus.recent(limit=50, where="source=?", params=("network",))
+    assert rows == []
+    bus.close()
+

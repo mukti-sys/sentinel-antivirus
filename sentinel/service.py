@@ -120,7 +120,7 @@ class SentinelOrchestrator:
         # Network sensor (no admin required).
         try:
             from sentinel.sensors.network_sensor import NetworkSensor
-            net = NetworkSensor(self._bus)
+            net = NetworkSensor(self._bus, baseline_on_start=True)
             net.start()
             self._sensors.append(net)
             logger.info("network_sensor started")

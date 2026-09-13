@@ -60,12 +60,30 @@ class NetworkSensor:
     events for new ones. One instance drives its own poll loop on a thread.
     """
 
-    def __init__(self, bus: EventBus, poll_interval: float = 5.0) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        poll_interval: float = 5.0,
+        baseline_on_start: bool = False,
+    ) -> None:
         self._bus = bus
         self._poll_interval = poll_interval
+        self._baseline_on_start = baseline_on_start
         self._seen: set[ConnKey] = set()
         self._running = False
         self._thread: None | __import__("threading").Thread = None
+
+    def establish_baseline(self) -> int:
+        """Silently populate self._seen with currently active connections
+        without publishing events. Prevents a burst of startup events for
+        pre-existing sockets on the machine.
+        Returns number of baseline connections recorded.
+        """
+        initial_count = len(self._seen)
+        self._snapshot()
+        count = len(self._seen) - initial_count
+        logger.info("network_sensor: baselined %d pre-existing connection(s)", count)
+        return count
 
     # ------------------------------------------------------------------ #
     def _snapshot(self) -> list[Event]:
@@ -151,6 +169,11 @@ class NetworkSensor:
 
         if self._running:
             return
+        if self._baseline_on_start:
+            try:
+                self.establish_baseline()
+            except Exception as exc:
+                logger.debug("network_sensor baseline error: %s", exc)
         self._running = True
         self._thread = threading.Thread(
             target=self._loop, name="sentinel-network", daemon=True

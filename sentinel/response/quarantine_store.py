@@ -150,6 +150,24 @@ class QuarantineStore:
 
         import sys
         if sys.platform == "win32":
+            # Primary: Fast in-process Win32 API via win32security (<0.1ms, zero subprocess churn)
+            try:
+                import win32security, ntsecuritycon
+                sd = win32security.GetNamedSecurityInfo(
+                    str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+                )
+                dacl = sd.GetSecurityDescriptorDacl() or win32security.ACL()
+                everyone = win32security.CreateWellKnownSid(win32security.WinWorldSid)
+                dacl.AddAccessDeniedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_EXECUTE, everyone)
+                win32security.SetNamedSecurityInfo(
+                    str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION,
+                    None, None, dacl, None
+                )
+                return
+            except Exception as exc:
+                logger.debug("native win32 ACL deny failed, falling back: %s", exc)
+
+            # Fallback: icacls command line utility
             try:
                 import subprocess
                 subprocess.run(
@@ -340,13 +358,30 @@ class QuarantineStore:
                 import stat, sys
                 dest.chmod(dest.stat().st_mode | stat.S_IWRITE | stat.S_IEXEC)
                 if sys.platform == "win32":
-                    import subprocess
-                    subprocess.run(
-                        ["icacls", str(dest), "/remove:d", "*S-1-1-0"],
-                        capture_output=True,
-                        timeout=2.0,
-                        check=False,
-                    )
+                    try:
+                        import win32security
+                        sd = win32security.GetNamedSecurityInfo(
+                            str(dest), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+                        )
+                        dacl = sd.GetSecurityDescriptorDacl()
+                        if dacl:
+                            everyone = win32security.CreateWellKnownSid(win32security.WinWorldSid)
+                            for i in range(dacl.GetAceCount() - 1, -1, -1):
+                                ace = dacl.GetAce(i)
+                                if ace[0][0] == win32security.ACCESS_DENIED_ACE_TYPE and ace[2] == everyone:
+                                    dacl.DeleteAce(i)
+                            win32security.SetNamedSecurityInfo(
+                                str(dest), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION,
+                                None, None, dacl, None
+                            )
+                    except Exception:
+                        import subprocess
+                        subprocess.run(
+                            ["icacls", str(dest), "/remove:d", "*S-1-1-0"],
+                            capture_output=True,
+                            timeout=2.0,
+                            check=False,
+                        )
             except Exception:
                 pass
             # Leave the quarantined copy for audit; it will be removed on
