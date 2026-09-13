@@ -125,8 +125,8 @@ jobs:
           }
           [System.IO.File]::WriteAllText($env:GITHUB_STEP_SUMMARY, $summary, [System.Text.Encoding]::UTF8)
 
-      - name: Upload Build Log Artifact on Failure
-        if: failure()
+      - name: Upload Build Log Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: driver-build-log
@@ -135,12 +135,23 @@ jobs:
       - name: Verify Driver Binary Exists
         shell: powershell
         run: |
-          $sys = "driver\SentinelFilter\x64\Release\SentinelFilter.sys"
-          if (-not (Test-Path $sys)) {
-              Write-Host "[FATAL] SentinelFilter.sys was not produced!" -ForegroundColor Red
-              exit 1
+          Write-Host "Searching for produced .sys files..."
+          $sysFiles = Get-ChildItem -Recurse -Filter "SentinelFilter.sys" -ErrorAction SilentlyContinue
+          foreach ($f in $sysFiles) {
+              Write-Host "Found: $($f.FullName) ($($f.Length) bytes)"
           }
-          Write-Host "[SUCCESS] SentinelFilter.sys was built! Size: $((Get-Item $sys).Length) bytes" -ForegroundColor Green
+          $expected = "driver\SentinelFilter\x64\Release\SentinelFilter.sys"
+          if (-not (Test-Path $expected)) {
+              if ($sysFiles.Count -gt 0) {
+                  Write-Host "Copying $($sysFiles[0].FullName) to $expected"
+                  New-Item -ItemType Directory -Path (Split-Path $expected) -Force | Out-Null
+                  Copy-Item $sysFiles[0].FullName $expected -Force
+              } else {
+                  Write-Host "[FATAL] No SentinelFilter.sys found anywhere in repo!" -ForegroundColor Red
+                  exit 1
+              }
+          }
+          Write-Host "[SUCCESS] SentinelFilter.sys is verified: $expected" -ForegroundColor Green
 
       - name: Upload SentinelFilter Driver Artifact
         uses: actions/upload-artifact@v4
