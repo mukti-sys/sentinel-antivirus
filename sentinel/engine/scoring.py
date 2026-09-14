@@ -73,6 +73,8 @@ WEIGHTS: dict[str, float] = {
     # Static classifier (FR-5).
     "vt_positive": 50.0,              # VirusTotal flags the hash
     "vt_unknown_suspicious_pe": 15.0, # unknown hash + suspicious PE features
+    "pe_masquerade": 85.0,            # Executable disguised as document/media (fires alone)
+    "pe_double_extension": 85.0,      # Deceptive double extension (fires alone)
     # Process-behavior rules (LOLBin / parent-child) — covered by rule engine,
     # but a direct suspicious-parent signal is allowed too.
     "suspicious_parent_child": 20.0,

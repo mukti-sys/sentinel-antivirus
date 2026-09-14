@@ -436,23 +436,55 @@ class StaticClassifier:
         if vt_verdict is not None and vt_verdict.verdict == "clean":
             return signals  # VT says clean — trust it, skip PE model
 
+        # --- Deceptive Double Extension Detection ---
+        name_parts = file_path.name.lower().split(".")
+        if len(name_parts) >= 3:
+            penultimate_ext = "." + name_parts[-2]
+            final_ext = "." + name_parts[-1]
+            if final_ext in {".exe", ".dll", ".sys", ".scr", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".hta"} and penultimate_ext in {
+                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".jpg", ".jpeg", ".png", ".gif", ".mp3", ".mp4", ".zip", ".rar"
+            }:
+                signals.append(Signal(
+                    kind="pe_double_extension",
+                    subject=subject,
+                    engine="static_classifier",
+                    reason=f"deceptive double extension detected in '{file_path.name}'",
+                ))
+                return signals
+
         pe_features = extract_pe_features(file_path, data=file_data)
-        if pe_features is not None and self.pe_model.is_suspicious(pe_features):
-            score = self.pe_model.anomaly_score(pe_features)
-            signals.append(Signal(
-                kind="vt_unknown_suspicious_pe",
-                subject=subject,
-                engine="static_classifier",
-                reason=(
-                    f"suspicious PE features in {file_path.name} "
-                    f"(anomaly_score={score:.3f}, "
-                    f"sections={pe_features.num_sections}, "
-                    f"entropy={pe_features.file_entropy:.2f}, "
-                    f"imports={pe_features.num_imports}, "
-                    f"signed={pe_features.has_signature}, "
-                    f"suspicious_sections={pe_features.suspicious_section_count})"
-                ),
-            ))
+        if pe_features is not None:
+            # Check for executable masquerading with non-executable extension
+            if file_path.suffix.lower() in {
+                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+                ".txt", ".rtf", ".jpg", ".jpeg", ".png", ".gif", ".bmp",
+                ".mp3", ".mp4", ".wav", ".avi", ".zip", ".rar", ".7z",
+                ".tar", ".gz", ".iso", ".dat", ".bin",
+            }:
+                signals.append(Signal(
+                    kind="pe_masquerade",
+                    subject=subject,
+                    engine="static_classifier",
+                    reason=f"executable PE binary masquerading with non-executable extension '{file_path.suffix.lower()}' in {file_path.name}",
+                ))
+                return signals
+
+            if self.pe_model.is_suspicious(pe_features):
+                score = self.pe_model.anomaly_score(pe_features)
+                signals.append(Signal(
+                    kind="vt_unknown_suspicious_pe",
+                    subject=subject,
+                    engine="static_classifier",
+                    reason=(
+                        f"suspicious PE features in {file_path.name} "
+                        f"(anomaly_score={score:.3f}, "
+                        f"sections={pe_features.num_sections}, "
+                        f"entropy={pe_features.file_entropy:.2f}, "
+                        f"imports={pe_features.num_imports}, "
+                        f"signed={pe_features.has_signature}, "
+                        f"suspicious_sections={pe_features.suspicious_section_count})"
+                    ),
+                ))
 
         return signals
 

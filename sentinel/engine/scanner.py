@@ -29,6 +29,14 @@ EXECUTABLE_EXTENSIONS = frozenset({
     ".wsf", ".wsh", ".hta", ".msi", ".msp", ".com", ".pif",
 })
 
+# Common document and media extensions abused in masquerading / double-extension attacks
+DECEPTIVE_DOC_EXTENSIONS = frozenset({
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".txt", ".rtf", ".jpg", ".jpeg", ".png", ".gif", ".bmp",
+    ".mp3", ".mp4", ".wav", ".avi", ".zip", ".rar", ".7z",
+    ".tar", ".gz", ".iso", ".dat", ".bin",
+})
+
 # System-level folders and files to bypass during recursive full scans
 SYSTEM_IGNORE_FOLDERS = frozenset({
     "$recycle.bin",
@@ -221,44 +229,73 @@ class OnDemandScanner:
                     description=f"VirusTotal flagged {vt_verdict.positives}/{vt_verdict.total} detections",
                 )
 
-        # 3. PE Feature anomaly model (for executable binaries)
-        if not threat and file_path.suffix.lower() in {".exe", ".dll", ".sys", ".scr"}:
-            features = extract_pe_features(file_path, data=file_data)
-            if features is not None:
-                # Identify protected Windows system binaries (which are catalog-signed via CatRoot)
-                is_system_binary = False
-                try:
-                    res_path = file_path.resolve()
-                    win_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
-                    is_system_binary = (
-                        res_path.is_relative_to(win_dir / "System32")
-                        or res_path.is_relative_to(win_dir / "SysWOW64")
-                        or res_path.is_relative_to(win_dir / "WinSxS")
-                    )
-                except Exception:
-                    pass
-
-                # Genuine structural anomalies: known packer sections or extreme entropy without Authenticode signature
-                if features.suspicious_section_count > 0:
+        # 3. PE Feature anomaly model & Masquerading checks
+        if not threat:
+            # Check for double extension spoofing (e.g., invoice.pdf.exe, resume.docx.scr)
+            name_parts = file_path.name.lower().split(".")
+            if len(name_parts) >= 3:
+                penultimate_ext = "." + name_parts[-2]
+                final_ext = "." + name_parts[-1]
+                if final_ext in EXECUTABLE_EXTENSIONS and penultimate_ext in DECEPTIVE_DOC_EXTENSIONS:
                     threat = ThreatDetection(
                         file_path=file_path,
                         sha256=sha256,
-                        threat_name="Heuristic:PE.SuspiciousPacker",
-                        score=75.0,
+                        threat_name="Heuristic:PE.DoubleExtension",
+                        score=80.0,
                         severity=ThreatSeverity.HIGH,
                         engine="pe_classifier",
-                        description=f"PE binary contains {features.suspicious_section_count} suspicious/packer section(s)",
+                        description=f"Deceptive double extension spoofing detected: '{file_path.name}'",
                     )
-                elif features.max_section_entropy > 7.85 and not features.has_signature and not is_system_binary:
+
+        if not threat and (file_path.suffix.lower() in EXECUTABLE_EXTENSIONS or file_data.startswith(b"MZ")):
+            features = extract_pe_features(file_path, data=file_data)
+            if features is not None:
+                # Check for executable masquerading under non-executable extension
+                if file_path.suffix.lower() in DECEPTIVE_DOC_EXTENSIONS:
                     threat = ThreatDetection(
                         file_path=file_path,
                         sha256=sha256,
-                        threat_name="Heuristic:PE.HighEntropySection",
-                        score=70.0,
-                        severity=ThreatSeverity.MEDIUM,
+                        threat_name="Heuristic:PE.MasqueradingExtension",
+                        score=85.0,
+                        severity=ThreatSeverity.HIGH,
                         engine="pe_classifier",
-                        description=f"Unsigned PE section with extreme entropy ({features.max_section_entropy:.2f} bits/byte)",
+                        description=f"Executable PE binary disguised with non-executable extension: '{file_path.suffix.lower()}'",
                     )
+                else:
+                    # Identify protected Windows system binaries (which are catalog-signed via CatRoot)
+                    is_system_binary = False
+                    try:
+                        res_path = file_path.resolve()
+                        win_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+                        is_system_binary = (
+                            res_path.is_relative_to(win_dir / "System32")
+                            or res_path.is_relative_to(win_dir / "SysWOW64")
+                            or res_path.is_relative_to(win_dir / "WinSxS")
+                        )
+                    except Exception:
+                        pass
+
+                    # Genuine structural anomalies: known packer sections or extreme entropy without Authenticode signature
+                    if features.suspicious_section_count > 0:
+                        threat = ThreatDetection(
+                            file_path=file_path,
+                            sha256=sha256,
+                            threat_name="Heuristic:PE.SuspiciousPacker",
+                            score=75.0,
+                            severity=ThreatSeverity.HIGH,
+                            engine="pe_classifier",
+                            description=f"PE binary contains {features.suspicious_section_count} suspicious/packer section(s)",
+                        )
+                    elif features.max_section_entropy > 7.85 and not features.has_signature and not is_system_binary:
+                        threat = ThreatDetection(
+                            file_path=file_path,
+                            sha256=sha256,
+                            threat_name="Heuristic:PE.HighEntropySection",
+                            score=70.0,
+                            severity=ThreatSeverity.MEDIUM,
+                            engine="pe_classifier",
+                            description=f"Unsigned PE section with extreme entropy ({features.max_section_entropy:.2f} bits/byte)",
+                        )
 
         # Optional auto-quarantine
         if threat and self.auto_quarantine and self.quarantine_store:

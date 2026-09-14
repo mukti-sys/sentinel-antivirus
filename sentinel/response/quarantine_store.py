@@ -116,6 +116,10 @@ class QuarantineStore:
     def quarantine_dir(self) -> Path:
         return self._quarantine_dir
 
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
