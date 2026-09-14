@@ -78,6 +78,16 @@ WEIGHTS: dict[str, float] = {
     # Process-behavior rules (LOLBin / parent-child) — covered by rule engine,
     # but a direct suspicious-parent signal is allowed too.
     "suspicious_parent_child": 20.0,
+    # Memory malware detection (unbacked executable pages, shellcode, hollowing)
+    "memory_unbacked_exec": 45.0,     # unbacked private executable memory region
+    "memory_shellcode": 80.0,         # shellcode prologue or reflective PE header (fires alone)
+    "memory_hollowing": 85.0,         # hollowed process memory header mismatch (fires alone)
+    # Command & Control (C2) detection
+    "c2_beaconing": 40.0,             # automated periodic beaconing (low jitter)
+    "c2_threat_intel": 85.0,          # known malicious C2 IP/domain/port match (fires alone)
+    # Behavioral sandbox execution
+    "sandbox_malicious": 85.0,        # sandbox observed malicious behavior (fires alone)
+    "sandbox_suspicious": 35.0,       # sandbox observed suspicious anomalies
 }
 
 # The DLL signals that, *alone*, must never trigger a response

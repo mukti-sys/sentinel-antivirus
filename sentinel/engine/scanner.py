@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from sentinel.engine.memory_scanner import MemoryScanner
 from sentinel.engine.static_classifier import StaticClassifier, _read_and_hash, extract_pe_features
 from sentinel.response.quarantine_store import QuarantineStore
 
@@ -136,6 +137,7 @@ class OnDemandScanner:
         self.classifier = classifier or StaticClassifier(yara_rules_dir=rules_dir)
         self.quarantine_store = quarantine_store
         self.auto_quarantine = auto_quarantine
+        self.memory_scanner = MemoryScanner()
 
         self._status = ScanStatus.IDLE
         self._cancel_event = threading.Event()
@@ -471,6 +473,35 @@ class OnDemandScanner:
         error_msg: str | None = None
 
         try:
+            # If quick scan, inspect running processes' virtual memory for injection
+            if quick_mode:
+                progress.current_file = "Scanning process virtual memory..."
+                if progress_callback:
+                    progress_callback(progress)
+                try:
+                    mem_threats = self.memory_scanner.scan_all_processes()
+                    for mt in mem_threats:
+                        severity = (
+                            ThreatSeverity.CRITICAL
+                            if mt.threat_type in ("reflective_pe", "shellcode_signature")
+                            else ThreatSeverity.HIGH
+                        )
+                        det = ThreatDetection(
+                            file_path=Path(f"PID_{mt.pid}_{mt.process_name}"),
+                            sha256="",
+                            threat_name=f"Memory.{mt.threat_type}",
+                            score=90.0,
+                            severity=severity,
+                            engine="memory_scanner",
+                            description=mt.description,
+                        )
+                        threats.append(det)
+                        progress.threats_found += 1
+                        if threat_callback:
+                            threat_callback(det)
+                except Exception as mem_exc:
+                    logger.debug("Process memory scan error: %s", mem_exc)
+
             file_generator = self._collect_files(targets, quick_mode=quick_mode)
 
             for file_path in file_generator:

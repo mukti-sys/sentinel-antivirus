@@ -24,8 +24,10 @@ from typing import Any
 
 from sentinel.engine.event_bus import EventBus
 from sentinel.engine.heuristics_bruteforce import BruteForceHeuristic
+from sentinel.engine.heuristics_c2 import C2BeaconDetector, C2Blocklist
 from sentinel.engine.heuristics_cryptomining import CryptominingHeuristic
 from sentinel.engine.heuristics_ransomware import RansomwareHeuristic
+from sentinel.engine.memory_scanner import MemoryScanner
 from sentinel.engine.rule_engine import RuleEngine
 from sentinel.engine.schema import Event, utc_timestamp
 from sentinel.engine.scoring import (
@@ -127,6 +129,9 @@ class DetectionConsumer:
             failed_login_count=login_count,
             window_seconds=login_window,
         )
+        self.c2_beacon_detector = C2BeaconDetector()
+        self.c2_blocklist = C2Blocklist()
+        self.memory_scanner = MemoryScanner()
         self.dll_reputation = DllReputationCache()
 
         # Lifecycle & state
@@ -189,6 +194,7 @@ class DetectionConsumer:
             pid = event.pid
             self.scorer.reset_pid(pid)
             self.cryptomining_heuristic.clear_cpu_flag(pid)
+            self.c2_beacon_detector.reset_pid(pid)
             self._proc_start_times.pop(pid, None)
             prefix = f"pid:{pid}"
             self._responded_subjects = {
@@ -232,7 +238,7 @@ class DetectionConsumer:
             except Exception as exc:
                 logger.debug("static classifier error: %s", exc)
 
-        # 4. Network Connections (Cryptomining Stratum Heuristics)
+        # 4. Network Connections (Cryptomining Stratum & C2 Heuristics)
         elif event.event_type == "connection":
             try:
                 net_sig = self.cryptomining_heuristic.check_network_event(event)
@@ -240,6 +246,20 @@ class DetectionConsumer:
                     signals.append(net_sig)
             except Exception as exc:
                 logger.debug("cryptomining network check error: %s", exc)
+
+            try:
+                c2_intel_sig = self.c2_blocklist.check_connection(event)
+                if c2_intel_sig:
+                    signals.append(c2_intel_sig)
+            except Exception as exc:
+                logger.debug("c2 blocklist check error: %s", exc)
+
+            try:
+                c2_beacon_sig = self.c2_beacon_detector.process_connection(event)
+                if c2_beacon_sig:
+                    signals.append(c2_beacon_sig)
+            except Exception as exc:
+                logger.debug("c2 beacon check error: %s", exc)
 
         # 5. Failed Logins (Brute Force Heuristics)
         elif event.event_type == "login_failed":

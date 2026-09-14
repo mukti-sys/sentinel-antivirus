@@ -10,7 +10,8 @@ __pycache__/
 # Local runtime data — NEVER commit. data/quarantine/ may hold quarantined
 # (possibly malicious) files; data/ holds the local events DB and logs.
 data/
-sentinel/data/
+sentinel/data/*
+!sentinel/data/*.joblib
 
 # Local settings overrides (keep the sample settings.yaml tracked)
 config/settings.local.yaml
