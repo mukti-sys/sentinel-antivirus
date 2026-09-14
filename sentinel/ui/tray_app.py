@@ -127,7 +127,8 @@ class TrayApp:
         Menu = _pystray.Menu
 
         items = [
-            MenuItem("Sentinel -- Active", None, enabled=False),
+            MenuItem("Open Sentinel Dashboard", self._on_open_dashboard, default=True),
+            MenuItem("Run Quick Scan", self._on_quick_scan),
             Menu.SEPARATOR,
             MenuItem(
                 self._quarantine_label(),
@@ -210,6 +211,28 @@ class TrayApp:
         else:
             logger.error("delete failed for %s", rec.id)
         self._refresh_menu()
+
+    def _on_open_dashboard(self, icon=None, item=None) -> None:
+        """Launch the full Sentinel GUI Dashboard."""
+        import subprocess, sys
+        py_exe = sys.executable
+        pyw_exe = Path(py_exe).parent / "pythonw.exe"
+        launcher = str(pyw_exe) if pyw_exe.exists() else py_exe
+        try:
+            subprocess.Popen([launcher, "-m", "sentinel.ui.dashboard"])
+        except Exception as exc:
+            logger.error("Failed to launch dashboard: %s", exc)
+
+    def _on_quick_scan(self, icon=None, item=None) -> None:
+        """Launch Sentinel GUI Dashboard for immediate scan."""
+        import subprocess, sys
+        py_exe = sys.executable
+        pyw_exe = Path(py_exe).parent / "pythonw.exe"
+        launcher = str(pyw_exe) if pyw_exe.exists() else py_exe
+        try:
+            subprocess.Popen([launcher, "-m", "sentinel.ui.dashboard"])
+        except Exception as exc:
+            logger.error("Failed to launch quick scan: %s", exc)
 
     def _on_exit(self, icon, item) -> None:
         """Exit the tray app (does NOT stop the core service)."""
