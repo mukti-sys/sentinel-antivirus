@@ -193,9 +193,20 @@ def extract_pe_features(
     has_debug = hasattr(pe, "DIRECTORY_ENTRY_DEBUG") and bool(
         pe.DIRECTORY_ENTRY_DEBUG
     )
-    has_signature = hasattr(pe, "DIRECTORY_ENTRY_SECURITY") and bool(
-        pe.DIRECTORY_ENTRY_SECURITY
-    )
+    has_signature = False
+    if path.is_file():
+        try:
+            from sentinel.engine.authenticode import verify_pe_signature
+            sig_res = verify_pe_signature(path)
+            has_signature = sig_res.is_signed and sig_res.is_valid
+        except Exception:
+            has_signature = hasattr(pe, "DIRECTORY_ENTRY_SECURITY") and bool(
+                pe.DIRECTORY_ENTRY_SECURITY
+            )
+    else:
+        has_signature = hasattr(pe, "DIRECTORY_ENTRY_SECURITY") and bool(
+            pe.DIRECTORY_ENTRY_SECURITY
+        )
 
     features = PEFeatures(
         file_size=len(data),
@@ -469,19 +480,21 @@ class StaticClassifier:
             return signals  # YARA is high-confidence; skip further checks
         vt_verdict = None
         if self.vt is not None:
-            vt_verdict = self.vt.lookup(sha256)
-            if vt_verdict is not None and vt_verdict.verdict == "malicious":
-                signals.append(Signal(
-                    kind="vt_positive",
-                    subject=subject,
-                    engine="static_classifier",
-                    reason=(
-                        f"VirusTotal: {vt_verdict.positives}/{vt_verdict.total} "
-                        f"detections for {file_path.name} "
-                        f"({sha256[:16]}…)"
-                    ),
-                ))
-                return signals  # strong signal; no need for PE fallback
+            from sentinel.intel.virustotal_client import is_eligible_for_vt_lookup
+            if is_eligible_for_vt_lookup(file_path):
+                vt_verdict = self.vt.lookup(sha256)
+                if vt_verdict is not None and vt_verdict.verdict == "malicious":
+                    signals.append(Signal(
+                        kind="vt_positive",
+                        subject=subject,
+                        engine="static_classifier",
+                        reason=(
+                            f"VirusTotal: {vt_verdict.positives}/{vt_verdict.total} "
+                            f"detections for {file_path.name} "
+                            f"({sha256[:16]}…)"
+                        ),
+                    ))
+                    return signals  # strong signal; no need for PE fallback
 
         # --- PE-feature fallback (offline detection) ---
         # Only run when VT is disabled or returned unknown/clean.

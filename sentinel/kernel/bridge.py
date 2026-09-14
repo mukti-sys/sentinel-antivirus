@@ -21,8 +21,10 @@ locking if needed.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import logging
 import os
+import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Optional
@@ -167,6 +169,110 @@ def _setup_fltlib(lib):
 
 
 # ----------------------------------------------------------------------- #
+# HashBlocklist — Authenticode & SHA-256 Defense-in-Depth                  #
+# ----------------------------------------------------------------------- #
+
+class HashBlocklist:
+    """Maintains a verified SHA-256 hash blocklist.
+
+    Provides defense-in-depth alongside kernel minifilter path rules,
+    preventing malware evasion via renaming, symlinking, or staging in
+    alternative directories.
+    """
+
+    def __init__(self) -> None:
+        # sha256_lower -> {"hash": str, "timestamp": float, "reason": str, "metadata": dict}
+        self._blocks: dict[str, dict] = {}
+
+    @staticmethod
+    def compute_sha256(path_or_bytes: str | bytes) -> Optional[str]:
+        """Compute SHA-256 hex string for a file or raw bytes."""
+        try:
+            h = hashlib.sha256()
+            if isinstance(path_or_bytes, bytes):
+                h.update(path_or_bytes)
+                return h.hexdigest().lower()
+            elif isinstance(path_or_bytes, str):
+                if not os.path.isfile(path_or_bytes):
+                    return None
+                with open(path_or_bytes, "rb") as f:
+                    while chunk := f.read(65536):
+                        h.update(chunk)
+                return h.hexdigest().lower()
+        except Exception as exc:
+            logger.debug("compute_sha256 failed: %s", exc)
+        return None
+
+    def add_hash(
+        self,
+        identifier: str,
+        reason: str = "",
+        metadata: Optional[dict] = None,
+    ) -> Optional[str]:
+        """Add a SHA-256 hash or file path to the blocklist.
+
+        If identifier is a 64-character hex string, it is treated as a SHA-256.
+        If identifier is an existing file path, its SHA-256 is computed.
+        """
+        ident_clean = identifier.strip().lower()
+        if len(ident_clean) == 64 and all(c in "0123456789abcdef" for c in ident_clean):
+            sha = ident_clean
+        else:
+            sha = self.compute_sha256(identifier)
+            if not sha:
+                logger.debug("add_hash: could not compute hash for %s", identifier)
+                return None
+
+        record = {
+            "hash": sha,
+            "timestamp": time.time(),
+            "reason": reason,
+            "metadata": metadata or {},
+        }
+        self._blocks[sha] = record
+        logger.info("hash blocklist: added %s (reason=%s)", sha, reason)
+        return sha
+
+    def remove_hash(self, identifier: str) -> bool:
+        """Remove a hash or file's hash from the blocklist."""
+        ident_clean = identifier.strip().lower()
+        if len(ident_clean) == 64 and all(c in "0123456789abcdef" for c in ident_clean):
+            sha = ident_clean
+        else:
+            sha = self.compute_sha256(identifier)
+
+        if sha and sha in self._blocks:
+            del self._blocks[sha]
+            logger.info("hash blocklist: removed %s", sha)
+            return True
+        return False
+
+    def is_blocked(self, identifier: str | bytes) -> tuple[bool, Optional[dict]]:
+        """Check if a hash, file path, or byte sequence is blocked."""
+        if isinstance(identifier, bytes):
+            sha = self.compute_sha256(identifier)
+        else:
+            ident_clean = identifier.strip().lower()
+            if len(ident_clean) == 64 and all(c in "0123456789abcdef" for c in ident_clean):
+                sha = ident_clean
+            else:
+                sha = self.compute_sha256(identifier)
+
+        if sha and sha in self._blocks:
+            return True, self._blocks[sha]
+        return False, None
+
+    def get_blocked_hashes(self) -> list[dict]:
+        return list(self._blocks.values())
+
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    def clear(self) -> None:
+        self._blocks.clear()
+
+
+# ----------------------------------------------------------------------- #
 # BlockEvent dataclass                                                     #
 # ----------------------------------------------------------------------- #
 
@@ -202,6 +308,7 @@ class KernelBridge:
         self._connected = False
         self._fltlib = None
         self._blocked_paths: dict[str, str] = {}  # original_path -> nt_path
+        self.hash_blocklist = HashBlocklist()
 
     @property
     def connected(self) -> bool:
@@ -280,12 +387,30 @@ class KernelBridge:
         )
         return hr == 0
 
-    def add_block(self, path: str) -> bool:
+    def add_block(self, path: str, force: bool = False) -> bool:
         """Add a file path to the kernel blocklist.
 
         Converts DOS paths to NT device paths to match Filter Manager's
         normalized paths (\\Device\\HarddiskVolumeX\\...).
+        Also registers the file's SHA-256 digest in the HashBlocklist.
+        Protects authentic Microsoft-signed binaries against accidental self-DOS.
         """
+        # Authenticode Safety Check: Refuse to block validly signed Microsoft core binaries
+        try:
+            from sentinel.engine.authenticode import verify_pe_signature
+            sig = verify_pe_signature(path)
+            if sig.is_signed and sig.is_valid and sig.is_microsoft and not force:
+                logger.error(
+                    "kernel bridge: REFUSING to block validly signed Microsoft binary %s (override with force=True)",
+                    path,
+                )
+                return False
+        except Exception as exc:
+            logger.debug("kernel bridge: signature check skipped for %s: %s", path, exc)
+
+        # Register SHA-256 in hash blocklist if file exists on disk
+        self.hash_blocklist.add_hash(path, reason="kernel_block")
+
         if not self._connected:
             logger.debug("kernel bridge: add_block no-op (not connected)")
             return False
@@ -304,6 +429,8 @@ class KernelBridge:
 
     def remove_block(self, path: str) -> bool:
         """Remove a file path from the kernel blocklist."""
+        self.hash_blocklist.remove_hash(path)
+
         if not self._connected:
             logger.debug("kernel bridge: remove_block no-op (not connected)")
             return False
@@ -323,6 +450,40 @@ class KernelBridge:
 
         logger.info("kernel bridge: blocked path removed: %s (nt: %s)", path, nt_path)
         return True
+
+    def add_hash_block(
+        self,
+        identifier: str,
+        reason: str = "",
+        metadata: Optional[dict] = None,
+    ) -> Optional[str]:
+        """Add a SHA-256 hash or file path directly to the hash blocklist."""
+        return self.hash_blocklist.add_hash(identifier, reason=reason, metadata=metadata)
+
+    def remove_hash_block(self, identifier: str) -> bool:
+        """Remove a SHA-256 hash or file path from the hash blocklist."""
+        return self.hash_blocklist.remove_hash(identifier)
+
+    def is_hash_blocked(self, identifier: str | bytes) -> tuple[bool, Optional[dict]]:
+        """Check if a SHA-256 hash, file path, or content bytes is blocked."""
+        return self.hash_blocklist.is_blocked(identifier)
+
+    def check_file_blocked(self, path: str) -> tuple[bool, str]:
+        """Dual-layer check: verifies both path-based driver table and hash blocklist.
+
+        Returns (is_blocked, matched_by_reason).
+        """
+        # Layer 1: Check driver path table
+        if path in self._blocked_paths or dos_to_nt_path(path) in self._blocked_paths:
+            return True, "driver_path"
+
+        # Layer 2: Check SHA-256 hash blocklist
+        blocked, info = self.hash_blocklist.is_blocked(path)
+        if blocked:
+            reason = info.get("reason", "hash_match") if info else "hash_match"
+            return True, f"hash_blocklist:{reason}"
+
+        return False, "clean"
 
     def get_status(self) -> dict:
         """Query the kernel driver for blocklist status.

@@ -214,3 +214,42 @@ class TestHashNormalization:
         result = c.get_cached(_HASH.upper())
         assert result is not None
         assert result.verdict == "clean"
+
+
+class TestTokenBucketAndTelemetry:
+    def test_token_bucket_acquire_and_replenish(self):
+        from sentinel.intel.virustotal_client import TokenBucket
+        bucket = TokenBucket(capacity=2.0, refill_rate=10.0)
+        assert bucket.acquire(1.0) is True
+        assert bucket.acquire(1.0) is True
+        # Bucket is now empty; acquire with 0 timeout should fail
+        assert bucket.acquire(1.0, timeout=0.01) is False
+
+        # Wait 0.15s to replenish at 10 tokens/sec (~1.5 tokens)
+        time.sleep(0.15)
+        assert bucket.acquire(1.0) is True
+
+    def test_backoff_on_429(self, tmp_path):
+        c = _make_client(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.ok = False
+        c._session = MagicMock()
+        c._session.get.return_value = mock_resp
+
+        assert c.lookup(_HASH) is None
+        telemetry = c.get_telemetry()
+        assert telemetry["rate_limit_hits"] == 1
+        assert telemetry["backoff_active"] is True
+        assert telemetry["backoff_remaining_sec"] > 0
+
+    def test_priority_triage_eligibility(self):
+        from sentinel.intel.virustotal_client import is_eligible_for_vt_lookup
+        # Clean signed system files should bypass VT
+        assert is_eligible_for_vt_lookup(score=0.0, is_signed=True) is False
+        assert is_eligible_for_vt_lookup(score=10.0, is_signed=True) is False
+
+        # Ambiguous or suspicious files should be queried
+        assert is_eligible_for_vt_lookup(score=45.0, is_signed=True) is True
+        assert is_eligible_for_vt_lookup(score=25.0, is_signed=False) is True
+

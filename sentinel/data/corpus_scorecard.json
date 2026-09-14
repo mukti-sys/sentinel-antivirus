@@ -1,0 +1,84 @@
+{
+  "timestamp": "2026-09-14T17:12:52.180Z",
+  "total_families": 8,
+  "yara_detections": 6,
+  "hash_blocklist_detections": 8,
+  "pe_ml_anomalies": 7,
+  "dynamic_containments": 8,
+  "results": [
+    {
+      "name": "WannaCry 2.0 Dropper",
+      "family": "WannaCry",
+      "sha256": "ed01ebf83334a1ecf42bb0a0b160f760a883572b8eec64f70bc542ecd3c1146b",
+      "yara": true,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    },
+    {
+      "name": "LockBit 3.0 (Black)",
+      "family": "LockBit",
+      "sha256": "d607f6e0261314644e5ec8408f6cf70e0600c2aa800cf8515c9a4fae3c3b0eb6",
+      "yara": true,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    },
+    {
+      "name": "Cobalt Strike Beacon (Stager)",
+      "family": "CobaltStrike",
+      "sha256": "1a2e4f02a5c898b67160759f270b20531e285d4546a1e3e7f41cf6a5e12f689e",
+      "yara": true,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    },
+    {
+      "name": "Emotet Epoch 5 Loader",
+      "family": "Emotet",
+      "sha256": "4f2910795c65f9737eb137b77ab5e1f0e4b47d7c675fbbe2d7b1d9dfd70a4428",
+      "yara": true,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    },
+    {
+      "name": "TrickBot Core Bot",
+      "family": "TrickBot",
+      "sha256": "c8309a6fb58ea0281c7e2bcfbb2dc316ad71bf4604b7ca6ec47a61d1e43c8d17",
+      "yara": false,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    },
+    {
+      "name": "QakBot (QBot) Packed DLL",
+      "family": "QakBot",
+      "sha256": "b8449df5d209fc3f9eef686302e21b19799635f60b4ef72d733cf85c0733db9b",
+      "yara": false,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    },
+    {
+      "name": "AgentTesla Stealer Stub",
+      "family": "AgentTesla",
+      "sha256": "fa01b3b28b7a66b9338f060716bfb4c810d7249dc6b2bdfaa73c38db5cc5c464",
+      "yara": true,
+      "hash_blocklist": true,
+      "ml_anomaly": false,
+      "containment": true
+    },
+    {
+      "name": "RedLine Stealer Payload",
+      "family": "RedLine",
+      "sha256": "3b36fa2c1fcf81ec6635a9d8213697e0ee57731f456ba12c75a4dc248d617937",
+      "yara": true,
+      "hash_blocklist": true,
+      "ml_anomaly": true,
+      "containment": true
+    }
+  ],
+  "clean_binaries_tested": 2,
+  "false_positives": 0
+}

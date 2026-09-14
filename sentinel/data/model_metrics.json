@@ -1,0 +1,29 @@
+{
+  "num_samples": 135,
+  "clean_samples_count": 15,
+  "anomalous_samples_count": 120,
+  "contamination": 0.18,
+  "n_estimators": 150,
+  "features_dim": 12,
+  "clean_accuracy": 0.0,
+  "anomaly_recall": 0.0833,
+  "f1_score": 0.0,
+  "sample_files": [
+    "07409496-a423-4a3e-b620-2cfb01a9318d_HyperV-ComputeNetwork.dll",
+    "0ae3b998-9a38-4b72-a4c4-06849441518d_Servicing-Stack.dll",
+    "3bc29097-7317-41d3-93b9-38a48f99d48a_mssrch.dll",
+    "4545ffe2-0dc4-4df4-9d02-299ef204635e_hvsocket.dll",
+    "69fe178f-26e7-43a9-aa7d-2b616b672dde_eventlogservice.dll",
+    "6bea57fb-8dfb-4177-9ae8-42e8b3529933_RuntimeDeviceInstall.dll",
+    "aadauthhelper.dll",
+    "aadcloudap.dll",
+    "aadjcsp.dll",
+    "aadtb.dll",
+    "aadWamExtension.dll",
+    "AarSvc.dll",
+    "AboutSettingsHandlers.dll",
+    "AboveLockAppHost.dll",
+    "accessibilitycpl.dll"
+  ],
+  "trained_at": "2026-09-14T18:09:20.718370+00:00"
+}
