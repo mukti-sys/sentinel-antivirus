@@ -134,9 +134,14 @@ class MemoryThreat:
     size: int
     threat_type: str
     description: str
-    confidence: float
+    confidence: float = 85.0
+    protection: int = 0x40
     sample_bytes: bytes = field(default=b"", repr=False)
     timestamp: float = field(default_factory=time.time)
+
+    @property
+    def evidence(self) -> str:
+        return self.description
 
     def to_signal(self) -> Signal:
         """Convert memory threat to an engine Signal for Scorer consumption."""

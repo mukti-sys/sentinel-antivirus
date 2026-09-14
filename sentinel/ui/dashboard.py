@@ -20,6 +20,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
+import psutil
+
+from sentinel.engine.heuristics_c2 import C2BeaconDetector, C2Blocklist, DEFAULT_C2_IPS, DEFAULT_C2_PORTS
+from sentinel.engine.memory_scanner import MemoryScanner, MemoryThreat
 from sentinel.engine.scanner import (
     OnDemandScanner,
     ScanProgress,
@@ -30,6 +34,7 @@ from sentinel.engine.scanner import (
     ThreatSeverity,
 )
 from sentinel.response.quarantine_store import QuarantineRecord, QuarantineStore
+from sentinel.sandbox.runner import SandboxReport, SandboxRunner
 from sentinel.ui.context_menu import (
     install_context_menu,
     is_context_menu_installed,
@@ -66,8 +71,8 @@ class SentinelDashboard(tk.Tk):
         super().__init__()
 
         self.title("Sentinel Antivirus")
-        self.geometry("960x620")
-        self.minsize(860, 540)
+        self.geometry("1040x680")
+        self.minsize(940, 600)
         self.configure(bg=COLOR_BG_DARK)
 
         # Core engine components
@@ -76,12 +81,23 @@ class SentinelDashboard(tk.Tk):
             quarantine_store=self.quarantine_store,
             auto_quarantine=True,
         )
+        self.memory_scanner = MemoryScanner()
+        self.sandbox_runner = SandboxRunner()
+        self.c2_blocklist = C2Blocklist()
+        self.c2_beacon_detector = C2BeaconDetector()
 
         # State
         self._current_tab = "overview"
         self._scan_thread: threading.Thread | None = None
         self._scan_active = False
         self._last_threats: list[ThreatDetection] = []
+        self._sandbox_target_var = tk.StringVar()
+        self._sandbox_duration_var = tk.StringVar(value="5")
+        self._sandbox_mem_var = tk.StringVar(value="128")
+        self._sandbox_cpu_var = tk.StringVar(value="20")
+        self._sandbox_active = False
+        self._memory_scan_active = False
+        self._last_sandbox_report: SandboxReport | None = None
 
         self._configure_styles()
         self._build_layout()
@@ -181,6 +197,9 @@ class SentinelDashboard(tk.Tk):
         nav_items = [
             ("overview", "🛡️  Protection Shield"),
             ("scan", "🔍  Scan Center"),
+            ("sandbox", "🧪  Sandbox Studio"),
+            ("memory", "🧠  Memory Shield"),
+            ("network", "🌐  C2 & Network"),
             ("quarantine", "📦  Quarantine Vault"),
             ("logs", "📜  Threat Logs"),
             ("settings", "⚙️  Settings"),
@@ -200,7 +219,7 @@ class SentinelDashboard(tk.Tk):
                 bd=0,
                 anchor="w",
                 padx=20,
-                pady=12,
+                pady=10,
                 cursor="hand2",
                 command=lambda k=key: self._switch_tab(k),
             )
@@ -209,7 +228,7 @@ class SentinelDashboard(tk.Tk):
 
         # Sidebar Footer Status
         sidebar_footer = tk.Frame(self.sidebar, bg=COLOR_SURFACE)
-        sidebar_footer.pack(side="bottom", fill="x", pday=15 if hasattr(tk, 'pday') else None, pady=15, padx=15)
+        sidebar_footer.pack(side="bottom", fill="x", pady=15, padx=15)
         lbl_ver = tk.Label(
             sidebar_footer,
             text="Sentinel v1.0 Consumer\nEngine: Kernel + YARA + ML",
@@ -228,6 +247,9 @@ class SentinelDashboard(tk.Tk):
         self._tab_frames: dict[str, tk.Frame] = {
             "overview": self._create_overview_tab(),
             "scan": self._create_scan_tab(),
+            "sandbox": self._create_sandbox_tab(),
+            "memory": self._create_memory_tab(),
+            "network": self._create_network_tab(),
             "quarantine": self._create_quarantine_tab(),
             "logs": self._create_logs_tab(),
             "settings": self._create_settings_tab(),
@@ -253,6 +275,10 @@ class SentinelDashboard(tk.Tk):
                     self._refresh_quarantine_table()
                 elif key == "logs":
                     self._refresh_logs_table()
+                elif key == "memory":
+                    self._refresh_memory_table()
+                elif key == "network":
+                    self._refresh_network_table()
             else:
                 frame.pack_forget()
 
@@ -1133,6 +1159,801 @@ class SentinelDashboard(tk.Tk):
         ).pack(anchor="w", pady=(8, 0))
 
         return frame
+
+    # ------------------------------------------------------------------ #
+    # Shared Helper: Telemetry Tile
+    # ------------------------------------------------------------------ #
+
+    def _create_telemetry_tile(
+        self,
+        parent: tk.Widget,
+        title: str,
+        initial_val: str,
+        side: str = "left",
+        fg: str = COLOR_TEXT_PRIMARY,
+    ) -> tk.Label:
+        card = tk.Frame(parent, bg=COLOR_SURFACE, bd=1, relief="solid", highlightbackground=COLOR_CARD_BORDER)
+        card.pack(side=side, fill="both", expand=True, padx=4)
+
+        inner = tk.Frame(card, bg=COLOR_SURFACE, padx=12, pady=10)
+        inner.pack(fill="both", expand=True)
+
+        tk.Label(inner, text=title, font=("Segoe UI", 8), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(anchor="w")
+        val_lbl = tk.Label(inner, text=initial_val, font=("Segoe UI", 12, "bold"), bg=COLOR_SURFACE, fg=fg)
+        val_lbl.pack(anchor="w", pady=(4, 0))
+        return val_lbl
+
+    def _dispatch_to_ui(self, callback: Any) -> None:
+        """Thread-safe UI callback dispatcher that tolerates closed windows or headless execution."""
+        try:
+            if self.winfo_exists():
+                self.after(0, callback)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    # Tab: Sandbox Isolation Studio
+    # ------------------------------------------------------------------ #
+
+    def _create_sandbox_tab(self) -> tk.Frame:
+        frame = tk.Frame(self.content_area, bg=COLOR_BG_DARK)
+
+        # Header Title
+        tk.Label(
+            frame,
+            text="🧪  Sandbox Isolation Studio",
+            font=("Segoe UI", 16, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            frame,
+            text="Execute suspicious binaries inside a secure Windows Job Object with strict RAM, CPU, and UI confinement.",
+            font=("Segoe UI", 9),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, 15))
+
+        # Target & Config Card
+        card_cfg = tk.Frame(frame, bg=COLOR_SURFACE, bd=1, relief="solid", highlightbackground=COLOR_CARD_BORDER)
+        card_cfg.pack(fill="x", pady=(0, 15), ipady=10, ipadx=15)
+
+        cfg_inner = tk.Frame(card_cfg, bg=COLOR_SURFACE, padx=15)
+        cfg_inner.pack(fill="x")
+
+        # Row 1: File selection
+        row1 = tk.Frame(cfg_inner, bg=COLOR_SURFACE)
+        row1.pack(fill="x", pady=(5, 10))
+
+        tk.Label(
+            row1,
+            text="Target Binary:",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_PRIMARY,
+            width=12,
+            anchor="w",
+        ).pack(side="left")
+
+        self.entry_sandbox_target = tk.Entry(
+            row1,
+            textvariable=self._sandbox_target_var,
+            font=("Segoe UI", 9),
+            bg=COLOR_SURFACE_HOVER,
+            fg=COLOR_TEXT_PRIMARY,
+            insertbackground=COLOR_TEXT_PRIMARY,
+            bd=1,
+            relief="solid",
+            highlightbackground=COLOR_CARD_BORDER,
+        )
+        self.entry_sandbox_target.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        btn_browse = tk.Button(
+            row1,
+            text="Browse...",
+            font=("Segoe UI", 9),
+            bg=COLOR_SURFACE_HOVER,
+            fg=COLOR_TEXT_PRIMARY,
+            bd=1,
+            relief="solid",
+            highlightbackground=COLOR_CARD_BORDER,
+            padx=12,
+            pady=3,
+            cursor="hand2",
+            command=self._on_browse_sandbox_target,
+        )
+        btn_browse.pack(side="right")
+
+        # Row 2: Parameters (Timeout, RAM, CPU) + Action buttons
+        row2 = tk.Frame(cfg_inner, bg=COLOR_SURFACE)
+        row2.pack(fill="x", pady=(0, 5))
+
+        # Timeout
+        tk.Label(row2, text="Timeout (s):", font=("Segoe UI", 9), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(side="left", padx=(0, 4))
+        tk.Entry(row2, textvariable=self._sandbox_duration_var, width=4, font=("Segoe UI", 9), bg=COLOR_SURFACE_HOVER, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid").pack(side="left", padx=(0, 15))
+
+        # RAM Limit
+        tk.Label(row2, text="RAM Cap (MB):", font=("Segoe UI", 9), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(side="left", padx=(0, 4))
+        tk.Entry(row2, textvariable=self._sandbox_mem_var, width=5, font=("Segoe UI", 9), bg=COLOR_SURFACE_HOVER, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid").pack(side="left", padx=(0, 15))
+
+        # CPU Limit
+        tk.Label(row2, text="CPU Cap (%):", font=("Segoe UI", 9), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(side="left", padx=(0, 4))
+        tk.Entry(row2, textvariable=self._sandbox_cpu_var, width=4, font=("Segoe UI", 9), bg=COLOR_SURFACE_HOVER, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid").pack(side="left", padx=(0, 20))
+
+        # Detonate Button
+        self.btn_detonate_sandbox = tk.Button(
+            row2,
+            text="🚀 Detonate in Sandbox",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_ACCENT_BLUE,
+            fg="#FFFFFF",
+            bd=0,
+            padx=14,
+            pady=5,
+            cursor="hand2",
+            command=self._on_detonate_sandbox,
+        )
+        self.btn_detonate_sandbox.pack(side="left", padx=(0, 10))
+
+        # Quarantine Button
+        self.btn_sandbox_quarantine = tk.Button(
+            row2,
+            text="📦 Quarantine File",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_ACCENT_RED,
+            fg="#FFFFFF",
+            bd=0,
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            state="disabled",
+            command=self._on_quarantine_sandbox_target,
+        )
+        self.btn_sandbox_quarantine.pack(side="left")
+
+        # Telemetry Stats Cards Row (4 tiles)
+        stats_frame = tk.Frame(frame, bg=COLOR_BG_DARK)
+        stats_frame.pack(fill="x", pady=(0, 15))
+
+        self.lbl_tile_processes = self._create_telemetry_tile(stats_frame, "Processes Spawned", "—", side="left")
+        self.lbl_tile_memory = self._create_telemetry_tile(stats_frame, "Peak RAM Usage", "—", side="left")
+        self.lbl_tile_dropped = self._create_telemetry_tile(stats_frame, "Dropped Payloads", "—", side="left")
+        self.lbl_tile_verdict = self._create_telemetry_tile(stats_frame, "Threat Verdict", "STANDBY", side="left", fg=COLOR_TEXT_SECONDARY)
+
+        # Findings Treeview
+        tk.Label(
+            frame,
+            text="Containment Telemetry & Behavioral Audit",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 5))
+
+        table_frame = tk.Frame(frame, bg=COLOR_SURFACE)
+        table_frame.pack(fill="both", expand=True)
+
+        cols = ("category", "indicator", "detail", "risk")
+        self.tree_sandbox = ttk.Treeview(
+            table_frame,
+            columns=cols,
+            show="headings",
+            style="Dark.Treeview",
+            selectmode="browse",
+        )
+        self.tree_sandbox.heading("category", text="Category")
+        self.tree_sandbox.heading("indicator", text="Indicator / Event")
+        self.tree_sandbox.heading("detail", text="Behavioral Details")
+        self.tree_sandbox.heading("risk", text="Risk / Classification")
+
+        self.tree_sandbox.column("category", width=140)
+        self.tree_sandbox.column("indicator", width=180)
+        self.tree_sandbox.column("detail", width=360)
+        self.tree_sandbox.column("risk", width=140, anchor="center")
+
+        sb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_sandbox.yview)
+        self.tree_sandbox.configure(yscrollcommand=sb.set)
+        self.tree_sandbox.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        return frame
+
+    def _on_browse_sandbox_target(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="Select Executable to Analyze",
+            filetypes=[("Executables", "*.exe;*.bat;*.cmd;*.dll"), ("All Files", "*.*")],
+        )
+        if filename:
+            self._sandbox_target_var.set(filename)
+
+    def _on_detonate_sandbox(self) -> None:
+        target = self._sandbox_target_var.get().strip()
+        if not target or not Path(target).exists():
+            messagebox.showerror("Sandbox Error", "Please select a valid executable file to analyze.")
+            return
+
+        try:
+            timeout = int(self._sandbox_duration_var.get())
+            mem_mb = int(self._sandbox_mem_var.get())
+            cpu_pct = int(self._sandbox_cpu_var.get())
+        except ValueError:
+            messagebox.showerror("Sandbox Error", "Timeout, RAM, and CPU must be valid integers.")
+            return
+
+        self._sandbox_active = True
+        self.btn_detonate_sandbox.config(state="disabled", text="⏳ Running Sandbox...")
+        self.btn_sandbox_quarantine.config(state="disabled")
+        self.lbl_tile_processes.config(text="Executing...", fg=COLOR_ACCENT_BLUE)
+        self.lbl_tile_memory.config(text="Measuring...", fg=COLOR_ACCENT_BLUE)
+        self.lbl_tile_dropped.config(text="Monitoring...", fg=COLOR_ACCENT_BLUE)
+        self.lbl_tile_verdict.config(text="CONFINED", fg=COLOR_ACCENT_BLUE)
+
+        for item in self.tree_sandbox.get_children():
+            self.tree_sandbox.delete(item)
+
+        thread = threading.Thread(
+            target=self._run_sandbox_worker,
+            args=(target, timeout, mem_mb, cpu_pct),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_sandbox_worker(self, target: str, timeout: int, mem_mb: int, cpu_pct: int) -> None:
+        try:
+            report = self.sandbox_runner.run(
+                executable_path=target,
+                timeout_sec=timeout,
+                max_memory_mb=mem_mb,
+                cpu_rate_pct=cpu_pct,
+            )
+        except Exception as exc:
+            logger.error("Sandbox error: %s", exc)
+            self._dispatch_to_ui(lambda: self._on_sandbox_failed(str(exc)))
+            return
+
+        self._dispatch_to_ui(lambda: self._on_sandbox_finished(report, target))
+
+    def _on_sandbox_failed(self, error_msg: str) -> None:
+        self._sandbox_active = False
+        self.btn_detonate_sandbox.config(state="normal", text="🚀 Detonate in Sandbox")
+        messagebox.showerror("Sandbox Detonation Error", f"Sandbox execution failed:\n{error_msg}")
+
+    def _on_sandbox_finished(self, report: SandboxReport, target: str) -> None:
+        self._sandbox_active = False
+        self._last_sandbox_report = report
+        self.btn_detonate_sandbox.config(state="normal", text="🚀 Detonate in Sandbox")
+
+        pids_str = f"{len(report.pids_spawned)} PID(s) ({', '.join(str(p) for p in report.pids_spawned[:3])})" if report.pids_spawned else "1 PID"
+        self.lbl_tile_processes.config(text=pids_str, fg=COLOR_TEXT_PRIMARY)
+
+        mem_str = f"{report.peak_memory_mb:.1f} MB"
+        self.lbl_tile_memory.config(text=mem_str, fg=COLOR_TEXT_PRIMARY)
+
+        dropped_cnt = len(report.dropped_files)
+        high_ent_cnt = sum(1 for f in report.dropped_files if f.is_high_entropy)
+        dropped_str = f"{dropped_cnt} file(s)" + (f" ({high_ent_cnt} High Entropy)" if high_ent_cnt else "")
+        self.lbl_tile_dropped.config(text=dropped_str, fg=COLOR_ACCENT_RED if high_ent_cnt else COLOR_TEXT_PRIMARY)
+
+        if report.is_malicious:
+            self.lbl_tile_verdict.config(text="🚨 MALICIOUS", fg=COLOR_ACCENT_RED)
+            self.btn_sandbox_quarantine.config(state="normal")
+        else:
+            self.lbl_tile_verdict.config(text="✅ SAFE", fg=COLOR_ACCENT_GREEN)
+            self.btn_sandbox_quarantine.config(state="disabled")
+
+        # Populate treeview
+        self.tree_sandbox.insert("", "end", values=("Execution", "Process Exit Status", f"Exit Code: {report.exit_code} | Duration: {report.duration_sec:.2f}s", "Normal" if report.exit_code == 0 else "Anomalous"))
+        self.tree_sandbox.insert("", "end", values=("Resources", "Peak Memory Consumption", f"{report.peak_memory_mb:.2f} MB (Cap: {report.max_memory_mb} MB)", "Safe" if report.peak_memory_mb < report.max_memory_mb else "Cap Hit"))
+        self.tree_sandbox.insert("", "end", values=("Containment", "Job Object Confinement", f"RAM Cap: {report.max_memory_mb}MB, CPU Cap: {report.cpu_rate_pct}%, UI Isolated", "Enforced"))
+
+        for pid in report.pids_spawned:
+            self.tree_sandbox.insert("", "end", values=("Process Tree", f"PID {pid}", "Spawned under Job Object tree", "Monitored"))
+
+        for df in report.dropped_files:
+            risk = "CRITICAL (High Entropy)" if df.is_high_entropy else "Low"
+            self.tree_sandbox.insert("", "end", values=("Filesystem", f"Dropped: {Path(df.path).name}", f"Size: {df.size_bytes}B | Shannon Entropy: {df.entropy:.2f}", risk))
+
+        for f in report.findings:
+            self.tree_sandbox.insert("", "end", values=("Behavioral Heuristic", f.get("category", "Behavior"), f.get("detail", ""), f.get("severity", "MEDIUM").upper()))
+
+    def _on_quarantine_sandbox_target(self) -> None:
+        target = self._sandbox_target_var.get().strip()
+        if not target or not Path(target).exists():
+            messagebox.showwarning("Quarantine", "File no longer exists.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm Quarantine",
+            f"Are you sure you want to isolate and quarantine:\n\n{target}\n\n"
+            "This will apply Win32 deny ACLs and move the file to the secure vault.",
+        )
+        if not confirm:
+            return
+
+        try:
+            record = self.quarantine_store.quarantine_file(
+                original_path=target,
+                threat_name="Sandbox.Behavioral.Malware",
+                threat_score=95.0,
+            )
+            messagebox.showinfo("Quarantined", f"File successfully quarantined to vault!\nID: {record.id}")
+            self.btn_sandbox_quarantine.config(state="disabled")
+            self._sandbox_target_var.set("")
+        except Exception as exc:
+            messagebox.showerror("Quarantine Error", f"Failed to quarantine file:\n{exc}")
+
+    # ------------------------------------------------------------------ #
+    # Tab: Memory Shield Scanner
+    # ------------------------------------------------------------------ #
+
+    def _create_memory_tab(self) -> tk.Frame:
+        frame = tk.Frame(self.content_area, bg=COLOR_BG_DARK)
+
+        # Header Title
+        tk.Label(
+            frame,
+            text="🧠  Memory Shield Scanner",
+            font=("Segoe UI", 16, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            frame,
+            text="Inspect virtual memory page tables across running processes using Win32 VirtualQueryEx to detect unbacked RWX code, shellcode, and reflective DLLs.",
+            font=("Segoe UI", 9),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, 15))
+
+        # Controls Bar
+        ctrl_card = tk.Frame(frame, bg=COLOR_SURFACE, bd=1, relief="solid", highlightbackground=COLOR_CARD_BORDER)
+        ctrl_card.pack(fill="x", pady=(0, 15), ipady=10, ipadx=15)
+
+        ctrl_inner = tk.Frame(ctrl_card, bg=COLOR_SURFACE, padx=15)
+        ctrl_inner.pack(fill="x")
+
+        self.btn_scan_memory = tk.Button(
+            ctrl_inner,
+            text="⚡ Scan Process Memory Now",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_ACCENT_BLUE,
+            fg="#FFFFFF",
+            bd=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self._on_scan_memory,
+        )
+        self.btn_scan_memory.pack(side="left", padx=(0, 12))
+
+        self.btn_kill_mem_proc = tk.Button(
+            ctrl_inner,
+            text="🚫 Terminate Process",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_SURFACE_HOVER,
+            fg=COLOR_ACCENT_RED,
+            bd=1,
+            relief="solid",
+            highlightbackground=COLOR_CARD_BORDER,
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            command=self._on_kill_memory_proc,
+        )
+        self.btn_kill_mem_proc.pack(side="left", padx=(0, 10))
+
+        self.btn_suspend_mem_proc = tk.Button(
+            ctrl_inner,
+            text="⏸️ Suspend Process",
+            font=("Segoe UI", 9),
+            bg=COLOR_SURFACE_HOVER,
+            fg=COLOR_TEXT_PRIMARY,
+            bd=1,
+            relief="solid",
+            highlightbackground=COLOR_CARD_BORDER,
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            command=self._on_suspend_memory_proc,
+        )
+        self.btn_suspend_mem_proc.pack(side="left", padx=(0, 15))
+
+        self.lbl_mem_status = tk.Label(
+            ctrl_inner,
+            text="Ready. Click Scan to audit active process virtual address spaces.",
+            font=("Segoe UI", 9),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_SECONDARY,
+        )
+        self.lbl_mem_status.pack(side="left", fill="x", expand=True)
+
+        # Telemetry Stats Cards Row
+        mem_stats_frame = tk.Frame(frame, bg=COLOR_BG_DARK)
+        mem_stats_frame.pack(fill="x", pady=(0, 15))
+
+        self.lbl_tile_mem_procs = self._create_telemetry_tile(mem_stats_frame, "Processes Audited", "0", side="left")
+        self.lbl_tile_mem_threats = self._create_telemetry_tile(mem_stats_frame, "Injected Threats", "0", side="left", fg=COLOR_ACCENT_GREEN)
+        self.lbl_tile_mem_rwx = self._create_telemetry_tile(mem_stats_frame, "Unbacked RWX Pages", "0", side="left")
+        self.lbl_tile_mem_status = self._create_telemetry_tile(mem_stats_frame, "Memory Health", "HEALTHY", side="left", fg=COLOR_ACCENT_GREEN)
+
+        # Memory Findings Table
+        tk.Label(
+            frame,
+            text="Discovered In-Memory Threats & Code Injection",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 5))
+
+        table_frame = tk.Frame(frame, bg=COLOR_SURFACE)
+        table_frame.pack(fill="both", expand=True)
+
+        cols = ("pid", "process", "base_addr", "protection", "threat_type", "confidence", "evidence")
+        self.tree_memory = ttk.Treeview(
+            table_frame,
+            columns=cols,
+            show="headings",
+            style="Dark.Treeview",
+            selectmode="browse",
+        )
+        self.tree_memory.heading("pid", text="PID")
+        self.tree_memory.heading("process", text="Process Name")
+        self.tree_memory.heading("base_addr", text="Base Address")
+        self.tree_memory.heading("protection", text="Protection")
+        self.tree_memory.heading("threat_type", text="Threat Type")
+        self.tree_memory.heading("confidence", text="Confidence")
+        self.tree_memory.heading("evidence", text="Evidence / Reason")
+
+        self.tree_memory.column("pid", width=70, anchor="center")
+        self.tree_memory.column("process", width=140)
+        self.tree_memory.column("base_addr", width=140)
+        self.tree_memory.column("protection", width=120, anchor="center")
+        self.tree_memory.column("threat_type", width=150)
+        self.tree_memory.column("confidence", width=90, anchor="center")
+        self.tree_memory.column("evidence", width=280)
+
+        sb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_memory.yview)
+        self.tree_memory.configure(yscrollcommand=sb.set)
+        self.tree_memory.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        return frame
+
+    def _on_scan_memory(self) -> None:
+        if self._memory_scan_active:
+            return
+        self._memory_scan_active = True
+        self.btn_scan_memory.config(state="disabled", text="⏳ Scanning RAM...")
+        self.lbl_mem_status.config(text="Scanning active processes for RWX memory & shellcode...", fg=COLOR_ACCENT_BLUE)
+
+        for item in self.tree_memory.get_children():
+            self.tree_memory.delete(item)
+
+        thread = threading.Thread(target=self._run_memory_scan_worker, daemon=True)
+        thread.start()
+
+    def _run_memory_scan_worker(self) -> None:
+        all_threats: list[tuple[int, str, MemoryThreat]] = []
+        scanned_count = 0
+        rwx_count = 0
+
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                pid = proc.info["pid"]
+                name = proc.info["name"] or "Unknown"
+                if pid <= 4 or pid == os.getpid():
+                    continue
+                scanned_count += 1
+                threats = self.memory_scanner.scan_process(pid)
+                for t in threats:
+                    all_threats.append((pid, name, t))
+                    if "RWX" in t.threat_type or t.protection == 0x40:
+                        rwx_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            except Exception as exc:
+                logger.debug("Memory scan error on pid %s: %s", proc, exc)
+
+        self._dispatch_to_ui(lambda: self._on_memory_scan_finished(scanned_count, all_threats, rwx_count))
+
+    def _on_memory_scan_finished(self, scanned_count: int, threats: list[tuple[int, str, MemoryThreat]], rwx_count: int) -> None:
+        self._memory_scan_active = False
+        self.btn_scan_memory.config(state="normal", text="⚡ Scan Process Memory Now")
+        self.lbl_tile_mem_procs.config(text=str(scanned_count))
+        self.lbl_tile_mem_rwx.config(text=str(rwx_count))
+
+        if threats:
+            self.lbl_tile_mem_threats.config(text=str(len(threats)), fg=COLOR_ACCENT_RED)
+            self.lbl_tile_mem_status.config(text="🚨 THREATS DETECTED", fg=COLOR_ACCENT_RED)
+            self.lbl_mem_status.config(text=f"Audit complete: Found {len(threats)} active memory threat(s)!", fg=COLOR_ACCENT_RED)
+        else:
+            self.lbl_tile_mem_threats.config(text="0", fg=COLOR_ACCENT_GREEN)
+            self.lbl_tile_mem_status.config(text="✅ HEALTHY", fg=COLOR_ACCENT_GREEN)
+            self.lbl_mem_status.config(text=f"Audit complete: {scanned_count} processes clean. No injected code detected.", fg=COLOR_ACCENT_GREEN)
+
+        for pid, name, t in threats:
+            prot_str = "PAGE_EXECUTE_READWRITE" if t.protection == 0x40 else f"0x{t.protection:X}"
+            self.tree_memory.insert(
+                "",
+                "end",
+                values=(
+                    pid,
+                    name,
+                    f"0x{t.base_address:012X}",
+                    prot_str,
+                    t.threat_type,
+                    f"{t.confidence:.1f}%",
+                    t.evidence,
+                ),
+            )
+
+    def _refresh_memory_table(self) -> None:
+        if not self.tree_memory.get_children() and not self._memory_scan_active:
+            self._on_scan_memory()
+
+    def _on_kill_memory_proc(self) -> None:
+        selected = self.tree_memory.selection()
+        if not selected:
+            messagebox.showinfo("Selection Required", "Please select a process from the memory threats list.")
+            return
+
+        item = self.tree_memory.item(selected[0])
+        pid = int(item["values"][0])
+        name = str(item["values"][1])
+
+        confirm = messagebox.askyesno(
+            "Terminate Process",
+            f"Are you sure you want to terminate malicious process?\n\nProcess: {name}\nPID: {pid}",
+        )
+        if not confirm:
+            return
+
+        try:
+            p = psutil.Process(pid)
+            p.kill()
+            messagebox.showinfo("Terminated", f"Successfully terminated {name} (PID: {pid}).")
+            self.tree_memory.delete(selected[0])
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to terminate process: {exc}")
+
+    def _on_suspend_memory_proc(self) -> None:
+        selected = self.tree_memory.selection()
+        if not selected:
+            messagebox.showinfo("Selection Required", "Please select a process from the memory threats list.")
+            return
+
+        item = self.tree_memory.item(selected[0])
+        pid = int(item["values"][0])
+        name = str(item["values"][1])
+
+        try:
+            p = psutil.Process(pid)
+            p.suspend()
+            messagebox.showinfo("Suspended", f"Successfully suspended {name} (PID: {pid}). Execution frozen.")
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to suspend process: {exc}")
+
+    # ------------------------------------------------------------------ #
+    # Tab: C2 & Network Activity Monitor
+    # ------------------------------------------------------------------ #
+
+    def _create_network_tab(self) -> tk.Frame:
+        frame = tk.Frame(self.content_area, bg=COLOR_BG_DARK)
+
+        # Header Title
+        tk.Label(
+            frame,
+            text="🌐  C2 & Network Activity Monitor",
+            font=("Segoe UI", 16, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            frame,
+            text="Real-time socket monitoring, known Command & Control (C2) threat intel correlation, and beacon timing irregularity detection.",
+            font=("Segoe UI", 9),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, 15))
+
+        # Controls Bar
+        ctrl_card = tk.Frame(frame, bg=COLOR_SURFACE, bd=1, relief="solid", highlightbackground=COLOR_CARD_BORDER)
+        ctrl_card.pack(fill="x", pady=(0, 15), ipady=10, ipadx=15)
+
+        ctrl_inner = tk.Frame(ctrl_card, bg=COLOR_SURFACE, padx=15)
+        ctrl_inner.pack(fill="x")
+
+        self.btn_refresh_network = tk.Button(
+            ctrl_inner,
+            text="🔄 Refresh Active Sockets",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_ACCENT_BLUE,
+            fg="#FFFFFF",
+            bd=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self._on_refresh_network,
+        )
+        self.btn_refresh_network.pack(side="left", padx=(0, 12))
+
+        self.btn_sever_socket = tk.Button(
+            ctrl_inner,
+            text="🔌 Sever Connection / Terminate PID",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_SURFACE_HOVER,
+            fg=COLOR_ACCENT_RED,
+            bd=1,
+            relief="solid",
+            highlightbackground=COLOR_CARD_BORDER,
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            command=self._on_sever_socket,
+        )
+        self.btn_sever_socket.pack(side="left", padx=(0, 15))
+
+        self.lbl_net_status = tk.Label(
+            ctrl_inner,
+            text="Ready. Live socket telemetry active.",
+            font=("Segoe UI", 9),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_SECONDARY,
+        )
+        self.lbl_net_status.pack(side="left", fill="x", expand=True)
+
+        # Telemetry Stats Cards Row
+        net_stats_frame = tk.Frame(frame, bg=COLOR_BG_DARK)
+        net_stats_frame.pack(fill="x", pady=(0, 15))
+
+        self.lbl_tile_net_sockets = self._create_telemetry_tile(net_stats_frame, "Active Sockets", "0", side="left")
+        self.lbl_tile_net_threats = self._create_telemetry_tile(net_stats_frame, "C2 Indicators", "0", side="left", fg=COLOR_ACCENT_GREEN)
+        self.lbl_tile_net_blocklist = self._create_telemetry_tile(net_stats_frame, "Threat Intel IPs", str(len(self.c2_blocklist.blocked_ips)), side="left")
+        self.lbl_tile_net_ports = self._create_telemetry_tile(net_stats_frame, "Monitored C2 Ports", str(len(self.c2_blocklist.blocked_ports)), side="left")
+
+        # Network Table
+        tk.Label(
+            frame,
+            text="Active Network Sockets & Threat Intel Evaluation",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 5))
+
+        table_frame = tk.Frame(frame, bg=COLOR_SURFACE)
+        table_frame.pack(fill="both", expand=True)
+
+        cols = ("pid", "process", "proto", "local", "remote", "state", "alert")
+        self.tree_network = ttk.Treeview(
+            table_frame,
+            columns=cols,
+            show="headings",
+            style="Dark.Treeview",
+            selectmode="browse",
+        )
+        self.tree_network.heading("pid", text="PID")
+        self.tree_network.heading("process", text="Process Name")
+        self.tree_network.heading("proto", text="Type")
+        self.tree_network.heading("local", text="Local Address")
+        self.tree_network.heading("remote", text="Remote Address")
+        self.tree_network.heading("state", text="Socket State")
+        self.tree_network.heading("alert", text="Threat Evaluation")
+
+        self.tree_network.column("pid", width=70, anchor="center")
+        self.tree_network.column("process", width=140)
+        self.tree_network.column("proto", width=60, anchor="center")
+        self.tree_network.column("local", width=180)
+        self.tree_network.column("remote", width=180)
+        self.tree_network.column("state", width=100, anchor="center")
+        self.tree_network.column("alert", width=230)
+
+        sb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_network.yview)
+        self.tree_network.configure(yscrollcommand=sb.set)
+        self.tree_network.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        return frame
+
+    def _refresh_network_table(self) -> None:
+        self._on_refresh_network()
+
+    def _on_refresh_network(self) -> None:
+        self.lbl_net_status.config(text="Enumerating active network sockets...", fg=COLOR_ACCENT_BLUE)
+        self.btn_refresh_network.config(state="disabled")
+
+        thread = threading.Thread(target=self._run_network_scan_worker, daemon=True)
+        thread.start()
+
+    def _run_network_scan_worker(self) -> None:
+        results = []
+        c2_threat_count = 0
+
+        try:
+            connections = psutil.net_connections(kind="inet")
+        except Exception as exc:
+            logger.debug("Failed to get net_connections: %s", exc)
+            connections = []
+
+        proc_names: dict[int, str] = {}
+        for c in connections:
+            pid = c.pid or 0
+            if pid not in proc_names:
+                try:
+                    proc_names[pid] = psutil.Process(pid).name() if pid > 0 else "System"
+                except Exception:
+                    proc_names[pid] = "Unknown"
+
+            proto = "TCP" if c.type == 1 else "UDP"
+            laddr = f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else "—"
+            raddr = f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else "—"
+            state = c.status if c.status else "ESTABLISHED"
+
+            alert = "Clean"
+            if c.raddr:
+                r_ip = c.raddr.ip
+                r_port = c.raddr.port
+                is_blocked, reason = self.c2_blocklist.check(r_ip, r_port)
+                if is_blocked:
+                    alert = f"🚨 {reason}"
+                    c2_threat_count += 1
+                elif r_port in self.c2_blocklist.blocked_ports:
+                    alert = f"⚠️ C2 Staging Port ({r_port})"
+                    c2_threat_count += 1
+
+            results.append((pid, proc_names[pid], proto, laddr, raddr, state, alert))
+
+        self._dispatch_to_ui(lambda: self._on_network_scan_finished(results, c2_threat_count))
+
+    def _on_network_scan_finished(self, results: list, c2_threat_count: int) -> None:
+        self.btn_refresh_network.config(state="normal")
+        self.lbl_tile_net_sockets.config(text=str(len(results)))
+
+        if c2_threat_count > 0:
+            self.lbl_tile_net_threats.config(text=str(c2_threat_count), fg=COLOR_ACCENT_RED)
+            self.lbl_net_status.config(text=f"WARNING: {c2_threat_count} suspicious/C2 socket(s) detected!", fg=COLOR_ACCENT_RED)
+        else:
+            self.lbl_tile_net_threats.config(text="0", fg=COLOR_ACCENT_GREEN)
+            self.lbl_net_status.config(text=f"Active sockets enumerated: {len(results)} clean.", fg=COLOR_ACCENT_GREEN)
+
+        for item in self.tree_network.get_children():
+            self.tree_network.delete(item)
+
+        results.sort(key=lambda r: 0 if "🚨" in r[6] or "⚠️" in r[6] else 1)
+
+        for row in results:
+            self.tree_network.insert("", "end", values=row)
+
+    def _on_sever_socket(self) -> None:
+        selected = self.tree_network.selection()
+        if not selected:
+            messagebox.showinfo("Selection Required", "Please select a network connection from the table.")
+            return
+
+        item = self.tree_network.item(selected[0])
+        pid = int(item["values"][0])
+        name = str(item["values"][1])
+        raddr = str(item["values"][4])
+
+        if pid <= 4:
+            messagebox.showwarning("Cannot Terminate", "Cannot terminate System or Idle process.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Sever Connection",
+            f"Are you sure you want to terminate process '{name}' (PID: {pid}) to sever connection to {raddr}?",
+        )
+        if not confirm:
+            return
+
+        try:
+            p = psutil.Process(pid)
+            p.kill()
+            messagebox.showinfo("Connection Severed", f"Successfully terminated {name} (PID: {pid}).")
+            self._on_refresh_network()
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to terminate process: {exc}")
 
     def _update_context_menu_btn_text(self) -> None:
         installed = is_context_menu_installed()

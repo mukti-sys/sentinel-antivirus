@@ -184,6 +184,14 @@ class C2Blocklist:
         self.blocked_ips = set(blocked_ips or DEFAULT_C2_IPS)
         self.blocked_ports = set(blocked_ports or DEFAULT_C2_PORTS)
 
+    def check(self, ip: str, port: int | None = None) -> tuple[bool, str]:
+        """Check an IP and optional port directly against the C2 blocklist."""
+        if ip in self.blocked_ips:
+            return True, f"Known C2 Threat Intel IP ({ip})"
+        if port and int(port) in self.blocked_ports and not ip.startswith(("10.", "192.168.", "172.16.")):
+            return True, f"Known C2 Staging Port ({port})"
+        return False, ""
+
     def check_connection(self, event: Event) -> Signal | None:
         """Match connection against known C2 indicators."""
         if event.event_type != "connection" or not event.pid:
