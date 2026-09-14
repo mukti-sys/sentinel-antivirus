@@ -1991,9 +1991,12 @@ def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description="Sentinel Antivirus Desktop Dashboard")
     parser.add_argument("--scan", type=str, help="Automatically scan specified path upon launch", default=None)
+    parser.add_argument("--tab", type=str, help="Active tab to display (overview, scan, sandbox, memory, network, quarantine, logs, settings)", default="overview")
     args = parser.parse_args()
 
     app = SentinelDashboard(auto_scan_target=args.scan)
+    if args.tab and args.tab in app._tab_frames:
+        app._switch_tab(args.tab)
     app.mainloop()
     return 0
 
