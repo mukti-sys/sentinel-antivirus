@@ -18,13 +18,17 @@ def test_dashboard(tmp_path):
         quarantine_dir=tmp_path / "quarantine",
         db_path=tmp_path / "quarantine.db",
     )
-    app = SentinelDashboard(quarantine_store=store)
-    app.withdraw()  # keep invisible
+    try:
+        app = SentinelDashboard(quarantine_store=store)
+        app.withdraw()  # keep invisible
+    except Exception as exc:
+        pytest.skip(f"Tkinter display or tcl runtime unavailable: {exc}")
     yield app
     try:
         app.destroy()
     except Exception:
         pass
+
 
 
 def test_dashboard_tabs_exist(test_dashboard):

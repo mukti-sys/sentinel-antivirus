@@ -141,3 +141,36 @@ class TestGracefulDegradation:
         # Toast tried first, failed, then balloon.
         mock_toast.assert_called_once()
         mock_balloon.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# Anti-Spam Throttling (Component 2 Trade-Off Fix)
+# --------------------------------------------------------------------------- #
+
+class TestAntiSpamThrottling:
+    """Verify sliding-window cooldown and suppression counter to prevent alert spam."""
+
+    @patch("sentinel.response.notifier._check_toast_available", return_value=True)
+    @patch("sentinel.response.notifier._send_toast", return_value=True)
+    def test_burst_alerts_are_throttled(self, mock_toast, mock_check):
+        notifier = Notifier(cooldown_sec=2.0)
+        # Send 10 identical alerts in rapid succession
+        for _ in range(10):
+            notifier.notify_alert(process_name="ransomware_burst.exe", reason="encrypting", pid=9999)
+
+        # Only the first alert should trigger a toast
+        assert mock_toast.call_count == 1
+        # Suppressed count tracked
+        assert sum(notifier._suppressed_counts.values()) == 9
+
+
+    @patch("sentinel.response.notifier._check_toast_available", return_value=True)
+    @patch("sentinel.response.notifier._send_toast", return_value=True)
+    def test_distinct_processes_not_blocked_by_throttle(self, mock_toast, mock_check):
+        notifier = Notifier(cooldown_sec=2.0)
+        notifier.notify_alert(process_name="evil1.exe", reason="threat 1", pid=1001)
+        notifier.notify_alert(process_name="evil2.exe", reason="threat 2", pid=1002)
+
+        # Both distinct processes should get notified
+        assert mock_toast.call_count == 2
+

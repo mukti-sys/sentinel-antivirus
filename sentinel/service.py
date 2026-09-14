@@ -64,6 +64,8 @@ class SentinelOrchestrator:
         self._bus = None
         self._kernel_bridge = None  # Phase 4: kernel enforcement bridge
         self._consumer = None       # Detection & response pipeline consumer
+        self._canary_manager = None # Honeypot canary deception engine
+        self._ipc_server = None     # Win32 Named Pipe IPC server (Session 0 bridge)
 
     def start(self) -> None:
         """Start all sensors and the detection loop."""
@@ -100,8 +102,29 @@ class SentinelOrchestrator:
         # Start detection consumer pipeline (wire sensors -> engines -> response).
         self._init_detection_consumer()
 
+        # Arm Honeypot Canary Deception Engine
+        try:
+            from sentinel.engine.canary import CanaryManager
+            self._canary_manager = CanaryManager()
+            armed = self._canary_manager.arm_traps()
+            logger.info("canary deception engine armed (%d traps)", armed)
+        except Exception as exc:
+            logger.warning("canary deception engine init failed: %s", exc)
+            self._canary_manager = None
+
+        # Start Win32 Named Pipe IPC server for desktop session communication
+        try:
+            from sentinel.ipc import NamedPipeServer
+            self._ipc_server = NamedPipeServer(command_handler=self._handle_ipc_command)
+            self._ipc_server.start()
+            logger.info("named pipe IPC server started")
+        except Exception as exc:
+            logger.warning("named pipe IPC server init failed: %s", exc)
+            self._ipc_server = None
+
         # Start sensors (each in its own thread per architecture.md Section 8).
         self._start_sensors()
+
 
     def _start_sensors(self) -> None:
         """Start all sensors, skipping any that fail to initialize."""
@@ -211,9 +234,74 @@ class SentinelOrchestrator:
             logger.exception("detection consumer failed to start: %s", exc)
             self._consumer = None
 
+    def _handle_ipc_command(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Handle incoming commands from desktop applications (Session 1+)."""
+        cmd = request.get("cmd")
+        if cmd == "ping":
+            return {"status": "ok", "pong": True, "service": "running", "version": "1.0.0"}
+
+        elif cmd == "get_status":
+            driver_info = {}
+            if self._kernel_bridge:
+                try:
+                    driver_info = self._kernel_bridge.get_status()
+                except Exception:
+                    pass
+
+            canary_info = {}
+            if self._canary_manager:
+                try:
+                    canary_info = self._canary_manager.get_status()
+                except Exception:
+                    pass
+
+            quarantine_count = 0
+            if self._consumer and getattr(self._consumer, "_quarantine_store", None):
+                try:
+                    quarantine_count = self._consumer._quarantine_store.count(decision="pending")
+                except Exception:
+                    pass
+
+            return {
+                "status": "ok",
+                "service": "running",
+                "pid": os.getpid(),
+                "shield": "GREEN",
+                "kernel_driver": driver_info,
+                "canary_traps": canary_info,
+                "sensors_active": len(self._sensors),
+                "quarantine_pending": quarantine_count,
+            }
+
+        elif cmd == "verify_canaries":
+            if not self._canary_manager:
+                return {"status": "error", "message": "canary engine not active"}
+            tampered = self._canary_manager.verify_all_canaries()
+            return {
+                "status": "ok",
+                "tampered_count": len(tampered),
+                "tampered": [{"path": str(t.path), "reason": r} for t, r in tampered],
+            }
+
+        elif cmd == "rearm_canaries":
+            if not self._canary_manager:
+                return {"status": "error", "message": "canary engine not active"}
+            repaired = self._canary_manager.repair_canaries()
+            return {"status": "ok", "repaired_count": repaired}
+
+        return {"status": "error", "message": f"unknown command: {cmd}"}
+
     def _cleanup(self) -> None:
-        """Stop consumer, sensors, disconnect bridge, and close the bus."""
-        # Stop detection consumer first.
+        """Stop IPC, consumer, sensors, disconnect bridge, disarm canaries, and close bus."""
+        # Stop IPC server first
+        if self._ipc_server:
+            try:
+                self._ipc_server.stop()
+                logger.info("IPC server stopped")
+            except Exception as exc:
+                logger.warning("IPC server stop error: %s", exc)
+
+        # Stop detection consumer
         if self._consumer:
             try:
                 self._consumer.stop()
@@ -227,7 +315,7 @@ class SentinelOrchestrator:
             except Exception as exc:
                 logger.warning("sensor stop error: %s", exc)
 
-        # Disconnect kernel bridge.
+        # Disconnect kernel bridge
         if self._kernel_bridge:
             try:
                 self._kernel_bridge.disconnect()
@@ -235,10 +323,19 @@ class SentinelOrchestrator:
             except Exception as exc:
                 logger.warning("kernel bridge disconnect error: %s", exc)
 
+        # Disarm canaries if shutting down cleanly
+        if self._canary_manager:
+            try:
+                self._canary_manager.disarm_traps()
+                logger.info("canary traps disarmed")
+            except Exception as exc:
+                logger.warning("canary disarm error: %s", exc)
+
         if self._bus:
             self._bus.close()
         _remove_pid()
         logger.info("orchestrator stopped")
+
 
 
 # --------------------------------------------------------------------------- #

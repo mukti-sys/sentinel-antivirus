@@ -50,9 +50,11 @@ class RansomwareHeuristic:
         self,
         write_rate_per_min: float = DEFAULT_WRITE_RATE_PER_MIN,
         entropy_alert: float = DEFAULT_ENTROPY_ALERT,
+        canary_manager=None,
     ) -> None:
         self.write_rate = write_rate_per_min
         self.entropy_alert = entropy_alert
+        self.canary_manager = canary_manager
         # scope -> deque[timestamp]
         self._writes: dict[str, deque] = defaultdict(deque)
         self._emitted_rate: set[str] = set()
@@ -79,6 +81,21 @@ class RansomwareHeuristic:
         action = event.extra.get("action")
         entropy = event.extra.get("entropy")
         path = event.image_path or "unknown"
+
+        # --- Canary Trap Interception (Instant Zero-Day Pre-Encryption Defense) ---
+        if self.canary_manager is not None and self.canary_manager.is_canary(path):
+            tampered, reason = self.canary_manager.check_tampering(path)
+            if tampered:
+                logger.warning("RANSOMWARE CANARY TRIPPED: %s by scope %s (action=%s)", path, scope, action)
+                signals.append(
+                    Signal(
+                        kind="canary_tripped",
+                        subject=scope,
+                        engine="ransomware_canary",
+                        reason=f"Sacrificial honeypot file tampered/encrypted: {path} ({reason})",
+                    )
+                )
+                return signals  # Immediate critical response; fast-track response
 
         # Record the write for the rate window (created/modified/moved all
         # count as mass-modification candidates; deletions count too since

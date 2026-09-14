@@ -66,6 +66,7 @@ WEIGHTS: dict[str, float] = {
     # Ransomware heuristic (FR-4).
     "entropy_spike": 30.0,
     "mass_modification": 30.0,
+    "canary_tripped": 85.0,           # Honeypot canary file modified/encrypted (fires alone)
     # Brute-force heuristic (FR-3).
     "failed_login_burst": 25.0,
     # YARA content scan — a rule match is a high-confidence indicator.

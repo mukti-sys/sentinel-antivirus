@@ -54,22 +54,38 @@ def _ensure_deps() -> bool:
         return False
 
 
-def _create_icon_image():
-    """Create a simple shield icon for the system tray (16x16 green shield)."""
+def _create_icon_image(status: str = "GREEN"):
+    """Create a shield icon for the system tray with status color.
+    
+    status:
+        - "GREEN": Normal / Protected
+        - "YELLOW": Warning / Investigation
+        - "RED": Threat Blocked / Canary Tripped
+    """
+    if not _ensure_deps() or _PIL_Image is None:
+        return None
+
+    palette = {
+        "GREEN": ((27, 94, 32, 255), (46, 125, 50, 255), (76, 175, 80, 255)),
+        "YELLOW": ((230, 81, 0, 255), (245, 124, 0, 255), (255, 179, 0, 255)),
+        "RED": ((183, 28, 28, 255), (211, 47, 47, 255), (239, 83, 80, 255)),
+    }
+    outline_col, fill_col, inner_col = palette.get(status.upper(), palette["GREEN"])
+
     img = _PIL_Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    # Draw a simple filled shield shape.
+
     from PIL import ImageDraw
     draw = ImageDraw.Draw(img)
-    # Shield outline.
+    # Shield outline
     draw.polygon(
         [(32, 4), (58, 14), (54, 44), (32, 58), (10, 44), (6, 14)],
-        fill=(46, 125, 50, 255),   # green
-        outline=(27, 94, 32, 255),
+        fill=fill_col,
+        outline=outline_col,
     )
-    # Inner highlight.
+    # Inner highlight
     draw.polygon(
         [(32, 12), (50, 20), (47, 40), (32, 50), (17, 40), (14, 20)],
-        fill=(76, 175, 80, 255),
+        fill=inner_col,
     )
     return img
 
@@ -78,8 +94,10 @@ class TrayApp:
     """System tray application for Sentinel.
 
     Provides a tray icon with menu items for:
-    - Viewing status (running/idle)
+    - Live shield status (Green / Yellow / Red)
+    - Honeypot Canary Traps health & verification
     - Managing quarantined items (restore / delete)
+    - Launching dashboard on-demand (RAM footprint <10MB when idle)
     - Exiting the tray app (does NOT stop the core service)
     """
 
@@ -87,11 +105,32 @@ class TrayApp:
         self,
         quarantine_store=None,
         notifier=None,
+        canary_manager=None,
     ) -> None:
         self._store = quarantine_store
         self._notifier = notifier
+        self._canary_mgr = canary_manager
         self._icon = None
         self._running = False
+        self._status = "GREEN"
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    def set_status(self, status: str) -> None:
+        """Update shield status color ('GREEN', 'YELLOW', 'RED')."""
+        self._status = status.upper()
+        if self._icon:
+            if _ensure_deps():
+                self._icon.icon = _create_icon_image(self._status)
+            title_text = {
+                "GREEN": "Sentinel -- Protected",
+                "YELLOW": "Sentinel -- Warning",
+                "RED": "Sentinel -- Threat Blocked",
+            }.get(self._status, f"Sentinel -- {self._status}")
+            self._icon.title = title_text
+            self._refresh_menu()
 
     def start(self) -> None:
         """Start the tray app (blocking — call from main thread or a
@@ -104,11 +143,11 @@ class TrayApp:
         menu = self._build_menu()
         self._icon = _pystray.Icon(
             name="Sentinel",
-            icon=_create_icon_image(),
-            title="Sentinel -- Active",
+            icon=_create_icon_image(self._status),
+            title=f"Sentinel -- {'Protected' if self._status == 'GREEN' else self._status}",
             menu=menu,
         )
-        logger.info("tray app started")
+        logger.info("tray app started (status=%s)", self._status)
         self._icon.run(setup=self._on_setup)
 
     def stop(self) -> None:
@@ -126,10 +165,18 @@ class TrayApp:
         MenuItem = _pystray.MenuItem
         Menu = _pystray.Menu
 
+        status_text = f"Shield Status: {self._status.capitalize()}"
+        canary_text = self._canary_label()
+
         items = [
+            MenuItem(status_text, None, enabled=False),
             MenuItem("Open Sentinel Dashboard", self._on_open_dashboard, default=True),
             MenuItem("Run Quick Scan", self._on_quick_scan),
             Menu.SEPARATOR,
+            MenuItem(
+                canary_text,
+                self._canary_submenu(),
+            ),
             MenuItem(
                 self._quarantine_label(),
                 self._quarantine_submenu(),
@@ -138,6 +185,54 @@ class TrayApp:
             MenuItem("Exit Tray", self._on_exit),
         ]
         return Menu(*items)
+
+    def _canary_label(self) -> str:
+        if self._canary_mgr is None:
+            return "Canary Traps (unconfigured)"
+        traps = len(self._canary_mgr.active_canaries)
+        return f"Canary Traps ({traps} armed)"
+
+    def _canary_submenu(self):
+        Menu = _pystray.Menu
+        MenuItem = _pystray.MenuItem
+
+        if self._canary_mgr is None:
+            return Menu(MenuItem("Canary traps unconfigured", None, enabled=False))
+
+        items = [
+            MenuItem("Verify Honeypots Now", self._on_verify_canaries),
+            MenuItem("Rearm All Traps", self._on_rearm_canaries),
+        ]
+        return Menu(*items)
+
+    def _on_verify_canaries(self, icon=None, item=None) -> None:
+        """Check if any canary honeypots have been tampered with."""
+        if not self._canary_mgr:
+            return
+        tampered = self._canary_mgr.verify_all_canaries()
+        if tampered:
+
+            self.set_status("RED")
+            if self._notifier:
+                self._notifier.notify_alert(
+                    process_name="Honeypot Tampering",
+                    reason=f"{len(tampered)} canary file(s) modified or deleted!",
+                    score=95.0,
+                )
+        else:
+            if self._notifier:
+                self._notifier.notify_info("All canary honeypots are intact and armed.")
+
+    def _on_rearm_canaries(self, icon=None, item=None) -> None:
+        """Repair or recreate any missing or damaged canaries."""
+        if not self._canary_mgr:
+            return
+        repaired = self._canary_mgr.repair_canaries()
+        if self._notifier:
+            self._notifier.notify_info(f"Canary traps checked: {repaired} restored.")
+        self._refresh_menu()
+
+
 
     def _quarantine_label(self) -> str:
         if self._store is None:

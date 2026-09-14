@@ -23,6 +23,8 @@ Notification types:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,15 +50,16 @@ class Notifier:
     Uses winrt (Windows Runtime) for modern Toast notifications when available,
     falling back to win32gui balloon tips. All notifications use calm, clear
     language per NFR-1.
-
-    The notifier is designed to degrade gracefully: if neither notification
-    mechanism works (e.g. running in a headless service context with no user
-    session), notifications are silently logged instead.
+    Includes anti-spam cooldown to suppress duplicate alert bursts.
     """
 
-    def __init__(self, app_name: str = "Sentinel") -> None:
+    def __init__(self, app_name: str = "Sentinel", cooldown_sec: float = 3.0) -> None:
         self.app_name = app_name
+        self.cooldown_sec = cooldown_sec
         self._toast_available = _check_toast_available()
+        self._recent_alerts: dict[str, float] = {}
+        self._suppressed_counts: dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def notify_alert(
         self,
@@ -109,8 +112,32 @@ class Notifier:
     def _send(self, notification: Notification) -> bool:
         """Send a notification via the best available channel.
 
-        Returns True if delivered, False if all channels failed.
+        Returns True if delivered, False if all channels failed or suppressed by anti-spam.
         """
+        with self._lock:
+            # Check for anti-spam alert throttling
+            now = time.time()
+            if notification.notification_type == "alert":
+                dedup_key = f"{notification.title}:{notification.process_name or notification.pid}:{notification.body[:40]}"
+                last_time = self._recent_alerts.get(dedup_key, 0.0)
+                if now - last_time < self.cooldown_sec:
+                    self._suppressed_counts[dedup_key] = self._suppressed_counts.get(dedup_key, 0) + 1
+                    logger.debug("Suppressed duplicate alert within cooldown (%s)", dedup_key)
+                    return False
+
+                suppressed = self._suppressed_counts.pop(dedup_key, 0)
+                if suppressed > 0:
+                    notification = Notification(
+                        title=notification.title,
+                        body=f"{notification.body}\n(+{suppressed} burst events suppressed)",
+                        notification_type=notification.notification_type,
+                        quarantine_id=notification.quarantine_id,
+                        pid=notification.pid,
+                        process_name=notification.process_name,
+                        extra=notification.extra,
+                    )
+                self._recent_alerts[dedup_key] = now
+
         sent = False
 
         if self._toast_available:
