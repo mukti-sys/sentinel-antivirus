@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from sentinel.engine.static_classifier import StaticClassifier, _read_and_hash
+from sentinel.engine.static_classifier import StaticClassifier, _read_and_hash, extract_pe_features
 from sentinel.response.quarantine_store import QuarantineStore
 
 logger = logging.getLogger("sentinel.scanner")
@@ -223,18 +223,41 @@ class OnDemandScanner:
 
         # 3. PE Feature anomaly model (for executable binaries)
         if not threat and file_path.suffix.lower() in {".exe", ".dll", ".sys", ".scr"}:
-            features = self.classifier.pe_model.extract_features(file_path)
+            features = extract_pe_features(file_path, data=file_data)
             if features is not None:
-                prob = self.classifier.pe_model.predict_proba(features)
-                if prob >= 0.70:
+                # Identify protected Windows system binaries (which are catalog-signed via CatRoot)
+                is_system_binary = False
+                try:
+                    res_path = file_path.resolve()
+                    win_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+                    is_system_binary = (
+                        res_path.is_relative_to(win_dir / "System32")
+                        or res_path.is_relative_to(win_dir / "SysWOW64")
+                        or res_path.is_relative_to(win_dir / "WinSxS")
+                    )
+                except Exception:
+                    pass
+
+                # Genuine structural anomalies: known packer sections or extreme entropy without Authenticode signature
+                if features.suspicious_section_count > 0:
                     threat = ThreatDetection(
                         file_path=file_path,
                         sha256=sha256,
-                        threat_name="Heuristic:PE.Anomaly",
-                        score=float(prob * 100.0),
-                        severity=ThreatSeverity.HIGH if prob >= 0.85 else ThreatSeverity.MEDIUM,
+                        threat_name="Heuristic:PE.SuspiciousPacker",
+                        score=75.0,
+                        severity=ThreatSeverity.HIGH,
                         engine="pe_classifier",
-                        description=f"PE anomaly model confidence: {prob:.1%}",
+                        description=f"PE binary contains {features.suspicious_section_count} suspicious/packer section(s)",
+                    )
+                elif features.max_section_entropy > 7.85 and not features.has_signature and not is_system_binary:
+                    threat = ThreatDetection(
+                        file_path=file_path,
+                        sha256=sha256,
+                        threat_name="Heuristic:PE.HighEntropySection",
+                        score=70.0,
+                        severity=ThreatSeverity.MEDIUM,
+                        engine="pe_classifier",
+                        description=f"Unsigned PE section with extreme entropy ({features.max_section_entropy:.2f} bits/byte)",
                     )
 
         # Optional auto-quarantine
