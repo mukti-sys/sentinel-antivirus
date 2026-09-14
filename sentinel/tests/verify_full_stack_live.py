@@ -25,7 +25,8 @@ from sentinel.service import SentinelOrchestrator
 from sentinel.kernel.bridge import KernelBridge, dos_to_nt_path
 from sentinel.tests.verify_live_phase4 import try_open_for_execute, create_test_exe, MINIMAL_EXE
 
-SENTINEL_PAYLOAD = b"MZ\x90\x00SENTINEL-ANTIVIRUS-TEST-PAYLOAD-AUTONOMOUS-QUARANTINE\x00"
+def make_payload() -> bytes:
+    return f"MZ\x90\x00SENTINEL-ANTIVIRUS-TEST-PAYLOAD-AUTONOMOUS-QUARANTINE-{int(time.time() * 1000)}\x00".encode()
 
 
 def main() -> int:
@@ -55,9 +56,10 @@ def main() -> int:
     test_file = downloads_dir / f"sentinel_live_{int(time.time())}.exe"
     print(f"\n[1] Dropping test payload into watched folder: {test_file}...")
 
-    # Write Sentinel test payload
-    test_file.write_bytes(SENTINEL_PAYLOAD)
-    print(f"   Created {test_file.name} ({len(SENTINEL_PAYLOAD)} bytes)")
+    # Write Sentinel test payload with unique timestamp
+    payload = make_payload()
+    test_file.write_bytes(payload)
+    print(f"   Created {test_file.name} ({len(payload)} bytes)")
 
     # Step 2: Publish/feed or wait for FS sensor to detect
     print("\n[2] Waiting for FS sensor -> DetectionConsumer to catch and quarantine...")
@@ -138,13 +140,19 @@ def main() -> int:
     assert Path(restored_path).exists(), "Restored file not found at original path"
     print(f"   Restored to: {restored_path} ✓")
 
-    # Clean up restored test file
-    Path(restored_path).unlink(missing_ok=True)
-
     # Step 6: Shutdown orchestrator
     print("\n[6] Stopping SentinelOrchestrator...")
     orch._cleanup()
     print("   Orchestrator cleanly stopped ✓")
+
+    # Clean up restored test file after sensors are stopped
+    time.sleep(0.5)
+    for _ in range(5):
+        try:
+            Path(restored_path).unlink(missing_ok=True)
+            break
+        except Exception:
+            time.sleep(0.3)
 
     print()
     print("=" * 65)
