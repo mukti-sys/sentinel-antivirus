@@ -12,6 +12,7 @@ __pycache__/
 data/
 sentinel/data/*
 !sentinel/data/*.joblib
+!sentinel/data/*.json
 
 # Local settings overrides (keep the sample settings.yaml tracked)
 config/settings.local.yaml

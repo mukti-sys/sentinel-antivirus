@@ -14,6 +14,7 @@ Key Architecture:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import os
@@ -68,11 +69,187 @@ def get_current_memory_mb() -> float:
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
 
 
+def _generate_clean_batch(n: int, rng: np.random.Generator) -> np.ndarray:
+    """Generate n authentic clean Windows executable feature vectors using vectorized sampling."""
+    categories = rng.choice(["system_service", "gui_app", "installer", "dotnet", "small_util"], size=n)
+    mat = np.zeros((n, len(FEATURE_NAMES)), dtype=np.float32)
+
+    for cat in ("system_service", "gui_app", "installer", "dotnet", "small_util"):
+        idx = np.where(categories == cat)[0]
+        cnt = len(idx)
+        if cnt == 0:
+            continue
+
+        if cat == "system_service":
+            mat[idx, 0] = rng.integers(40000, 300000, size=cnt)
+            mat[idx, 1] = rng.integers(4, 7, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x8000, size=cnt)
+            mat[idx, 3] = rng.uniform(5.2, 6.6, size=cnt)
+            mat[idx, 4] = 1.0
+            mat[idx, 5] = rng.choice([0.0, 1.0], p=[0.1, 0.9], size=cnt)
+            mat[idx, 6] = rng.integers(25, 120, size=cnt)
+            mat[idx, 7] = rng.integers(0, 5, size=cnt)
+            mat[idx, 8] = 0.0
+            mat[idx, 9] = rng.uniform(4.8, 6.2, size=cnt)
+            mat[idx, 10] = rng.uniform(5.8, 6.7, size=cnt)
+            mat[idx, 11] = rng.choice([512.0, 1024.0, 2048.0, 4096.0], size=cnt)
+        elif cat == "gui_app":
+            mat[idx, 0] = rng.integers(800000, 15000000, size=cnt)
+            mat[idx, 1] = rng.integers(5, 10, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x30000, size=cnt)
+            mat[idx, 3] = rng.uniform(6.0, 7.1, size=cnt)
+            mat[idx, 4] = rng.choice([0.0, 1.0], p=[0.3, 0.7], size=cnt)
+            mat[idx, 5] = rng.choice([0.0, 1.0], p=[0.15, 0.85], size=cnt)
+            mat[idx, 6] = rng.integers(80, 450, size=cnt)
+            mat[idx, 7] = rng.integers(0, 50, size=cnt)
+            mat[idx, 8] = 0.0
+            mat[idx, 9] = rng.uniform(5.5, 6.6, size=cnt)
+            mat[idx, 10] = rng.uniform(6.5, 7.3, size=cnt)
+            mat[idx, 11] = rng.choice([1024.0, 2048.0, 4096.0], size=cnt)
+        elif cat == "installer":
+            mat[idx, 0] = rng.integers(5000000, 35000000, size=cnt)
+            mat[idx, 1] = rng.integers(6, 12, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x10000, size=cnt)
+            mat[idx, 3] = rng.uniform(7.1, 7.6, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 1.0
+            mat[idx, 6] = rng.integers(40, 160, size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = 0.0
+            mat[idx, 9] = rng.uniform(6.2, 7.3, size=cnt)
+            mat[idx, 10] = rng.uniform(7.2, 7.7, size=cnt)
+            mat[idx, 11] = rng.choice([512.0, 1024.0, 4096.0], size=cnt)
+        elif cat == "dotnet":
+            mat[idx, 0] = rng.integers(15000, 1200000, size=cnt)
+            mat[idx, 1] = rng.integers(3, 5, size=cnt)
+            mat[idx, 2] = 0x2000
+            mat[idx, 3] = rng.uniform(4.5, 6.2, size=cnt)
+            mat[idx, 4] = rng.choice([0.0, 1.0], p=[0.2, 0.8], size=cnt)
+            mat[idx, 5] = rng.choice([0.0, 1.0], p=[0.4, 0.6], size=cnt)
+            mat[idx, 6] = rng.choice([1.0, 2.0, 3.0], size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = 0.0
+            mat[idx, 9] = rng.uniform(4.0, 5.8, size=cnt)
+            mat[idx, 10] = rng.uniform(5.0, 6.5, size=cnt)
+            mat[idx, 11] = 512.0
+        else:
+            mat[idx, 0] = rng.integers(20000, 800000, size=cnt)
+            mat[idx, 1] = rng.integers(3, 7, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x15000, size=cnt)
+            mat[idx, 3] = rng.uniform(5.0, 6.5, size=cnt)
+            mat[idx, 4] = 1.0
+            mat[idx, 5] = rng.choice([0.0, 1.0], p=[0.2, 0.8], size=cnt)
+            mat[idx, 6] = rng.integers(15, 90, size=cnt)
+            mat[idx, 7] = rng.integers(1, 400, size=cnt)
+            mat[idx, 8] = 0.0
+            mat[idx, 9] = rng.uniform(4.5, 6.0, size=cnt)
+            mat[idx, 10] = rng.uniform(5.5, 6.8, size=cnt)
+            mat[idx, 11] = 512.0
+
+    return mat
+
+
+def _generate_malware_batch(n: int, rng: np.random.Generator) -> np.ndarray:
+    """Generate n authentic malware threat campaign feature vectors using vectorized sampling."""
+    families = rng.choice([
+        "lockbit", "wannacry", "cobalt_strike", "emotet",
+        "trickbot", "agent_tesla", "packer", "darkside"
+    ], size=n)
+    mat = np.zeros((n, len(FEATURE_NAMES)), dtype=np.float32)
+
+    for fam in ("lockbit", "wannacry", "cobalt_strike", "emotet", "trickbot", "agent_tesla", "packer", "darkside"):
+        idx = np.where(families == fam)[0]
+        cnt = len(idx)
+        if cnt == 0:
+            continue
+
+        if fam in ("lockbit", "darkside"):
+            mat[idx, 0] = rng.integers(120000, 450000, size=cnt)
+            mat[idx, 1] = rng.integers(4, 7, size=cnt)
+            mat[idx, 2] = rng.integers(0x2000, 0x9000, size=cnt)
+            mat[idx, 3] = rng.uniform(7.85, 7.98, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 0.0
+            mat[idx, 6] = rng.integers(2, 14, size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = rng.integers(1, 3, size=cnt)
+            mat[idx, 9] = rng.uniform(7.4, 7.85, size=cnt)
+            mat[idx, 10] = rng.uniform(7.94, 7.99, size=cnt)
+            mat[idx, 11] = rng.choice([128.0, 256.0, 512.0], size=cnt)
+        elif fam == "wannacry":
+            mat[idx, 0] = rng.integers(3400000, 3900000, size=cnt)
+            mat[idx, 1] = rng.integers(4, 6, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x4500, size=cnt)
+            mat[idx, 3] = rng.uniform(7.88, 7.97, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 0.0
+            mat[idx, 6] = rng.integers(12, 35, size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = rng.integers(1, 2, size=cnt)
+            mat[idx, 9] = rng.uniform(7.2, 7.6, size=cnt)
+            mat[idx, 10] = rng.uniform(7.94, 7.99, size=cnt)
+            mat[idx, 11] = 512.0
+        elif fam == "cobalt_strike":
+            mat[idx, 0] = rng.integers(14000, 85000, size=cnt)
+            mat[idx, 1] = rng.integers(2, 4, size=cnt)
+            mat[idx, 2] = rng.integers(0x400, 0x1200, size=cnt)
+            mat[idx, 3] = rng.uniform(7.82, 7.96, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 0.0
+            mat[idx, 6] = rng.integers(1, 4, size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = rng.choice([0.0, 1.0], size=cnt)
+            mat[idx, 9] = rng.uniform(7.2, 7.7, size=cnt)
+            mat[idx, 10] = rng.uniform(7.92, 7.99, size=cnt)
+            mat[idx, 11] = rng.choice([64.0, 128.0, 256.0], size=cnt)
+        elif fam in ("emotet", "trickbot"):
+            mat[idx, 0] = rng.integers(220000, 750000, size=cnt)
+            mat[idx, 1] = rng.integers(5, 8, size=cnt)
+            mat[idx, 2] = rng.integers(0x3000, 0x14000, size=cnt)
+            mat[idx, 3] = rng.uniform(7.72, 7.93, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 0.0
+            mat[idx, 6] = rng.integers(5, 20, size=cnt)
+            mat[idx, 7] = rng.integers(0, 3, size=cnt)
+            mat[idx, 8] = rng.integers(1, 2, size=cnt)
+            mat[idx, 9] = rng.uniform(6.9, 7.6, size=cnt)
+            mat[idx, 10] = rng.uniform(7.88, 7.98, size=cnt)
+            mat[idx, 11] = rng.choice([256.0, 512.0, 1024.0], size=cnt)
+        elif fam == "agent_tesla":
+            mat[idx, 0] = rng.integers(350000, 950000, size=cnt)
+            mat[idx, 1] = rng.integers(3, 6, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x5000, size=cnt)
+            mat[idx, 3] = rng.uniform(7.65, 7.91, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 0.0
+            mat[idx, 6] = rng.integers(4, 16, size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = rng.choice([0.0, 1.0], size=cnt)
+            mat[idx, 9] = rng.uniform(6.8, 7.5, size=cnt)
+            mat[idx, 10] = rng.uniform(7.85, 7.96, size=cnt)
+            mat[idx, 11] = 512.0
+        else:
+            mat[idx, 0] = rng.integers(60000, 800000, size=cnt)
+            mat[idx, 1] = rng.integers(2, 5, size=cnt)
+            mat[idx, 2] = rng.integers(0x1000, 0x25000, size=cnt)
+            mat[idx, 3] = rng.uniform(7.80, 7.96, size=cnt)
+            mat[idx, 4] = 0.0
+            mat[idx, 5] = 0.0
+            mat[idx, 6] = rng.integers(2, 8, size=cnt)
+            mat[idx, 7] = 0.0
+            mat[idx, 8] = rng.integers(2, 4, size=cnt)
+            mat[idx, 9] = rng.uniform(7.3, 7.8, size=cnt)
+            mat[idx, 10] = rng.uniform(7.90, 7.99, size=cnt)
+            mat[idx, 11] = rng.choice([0.0, 128.0, 256.0], size=cnt)
+
+    return mat
+
+
 def generate_parquet_dataset(
     output_path: Path,
     num_samples: int = 100000,
     clean_ratio: float = 0.5,
-    chunk_size: int = 25000,
+    chunk_size: int = 250000,
 ) -> int:
     """Generate a large-scale authentic PE feature dataset and stream to Apache Parquet."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,194 +273,27 @@ def generate_parquet_dataset(
         chunk_clean = int(current_chunk * clean_ratio)
         chunk_malware = current_chunk - chunk_clean
 
-        chunk_data: list[list[float]] = []
-        chunk_labels: list[int] = []
+        mat_clean = _generate_clean_batch(chunk_clean, rng)
+        mat_malware = _generate_malware_batch(chunk_malware, rng)
 
-        # -------------------------------------------------------------
-        # 1. Clean Binaries Distribution (Genuine software patterns)
-        # -------------------------------------------------------------
-        for _ in range(chunk_clean):
-            category = rng.choice(["system_service", "gui_app", "installer", "dotnet", "small_util", "dll"])
-            if category == "system_service":
-                size = rng.integers(40000, 300000)
-                sections = rng.integers(4, 7)
-                ep = rng.integers(0x1000, 0x8000)
-                ent = rng.uniform(5.2, 6.6)
-                has_debug = 1.0
-                has_sig = float(rng.choice([0, 1], p=[0.1, 0.9])) # 90% signed
-                imports = rng.integers(25, 120)
-                exports = rng.integers(0, 5)
-                susp = 0.0
-                avg_sec_ent = rng.uniform(4.8, 6.2)
-                max_sec_ent = rng.uniform(5.8, 6.7)
-                min_sec_size = float(rng.choice([512, 1024, 2048, 4096]))
-            elif category == "gui_app":
-                size = rng.integers(800000, 15000000)
-                sections = rng.integers(5, 10)
-                ep = rng.integers(0x1000, 0x30000)
-                ent = rng.uniform(6.0, 7.1)
-                has_debug = float(rng.choice([0, 1], p=[0.3, 0.7]))
-                has_sig = float(rng.choice([0, 1], p=[0.15, 0.85]))
-                imports = rng.integers(80, 450)
-                exports = rng.integers(0, 50)
-                susp = 0.0
-                avg_sec_ent = rng.uniform(5.5, 6.6)
-                max_sec_ent = rng.uniform(6.5, 7.3)
-                min_sec_size = float(rng.choice([1024, 2048, 4096]))
-            elif category == "installer":
-                size = rng.integers(5000000, 35000000)
-                sections = rng.integers(6, 12)
-                ep = rng.integers(0x1000, 0x10000)
-                ent = rng.uniform(7.1, 7.6) # Compressed payload, but signed & legitimate
-                has_debug = 0.0
-                has_sig = 1.0
-                imports = rng.integers(40, 160)
-                exports = 0.0
-                susp = 0.0
-                avg_sec_ent = rng.uniform(6.2, 7.3)
-                max_sec_ent = rng.uniform(7.2, 7.7)
-                min_sec_size = float(rng.choice([512, 1024, 4096]))
-            elif category == "dotnet":
-                size = rng.integers(15000, 1200000)
-                sections = rng.integers(3, 5)
-                ep = 0x2000
-                ent = rng.uniform(4.5, 6.2)
-                has_debug = float(rng.choice([0, 1], p=[0.2, 0.8]))
-                has_sig = float(rng.choice([0, 1], p=[0.4, 0.6]))
-                imports = float(rng.choice([1, 2, 3])) # mscoree.dll
-                exports = 0.0
-                susp = 0.0
-                avg_sec_ent = rng.uniform(4.0, 5.8)
-                max_sec_ent = rng.uniform(5.0, 6.5)
-                min_sec_size = 512.0
-            else: # dll or small utility
-                size = rng.integers(20000, 800000)
-                sections = rng.integers(3, 7)
-                ep = rng.integers(0x1000, 0x15000)
-                ent = rng.uniform(5.0, 6.5)
-                has_debug = 1.0
-                has_sig = float(rng.choice([0, 1], p=[0.2, 0.8]))
-                imports = rng.integers(15, 90)
-                exports = rng.integers(1, 400)
-                susp = 0.0
-                avg_sec_ent = rng.uniform(4.5, 6.0)
-                max_sec_ent = rng.uniform(5.5, 6.8)
-                min_sec_size = 512.0
-
-            row = [
-                float(size), float(sections), float(ep), float(ent),
-                has_debug, has_sig, float(imports), float(exports),
-                susp, float(avg_sec_ent), float(max_sec_ent), min_sec_size
-            ]
-            chunk_data.append(row)
-            chunk_labels.append(0)
-
-        # -------------------------------------------------------------
-        # 2. Malware Distribution (Real-world threat campaign archetypes)
-        # -------------------------------------------------------------
-        for _ in range(chunk_malware):
-            threat_family = rng.choice([
-                "lockbit", "wannacry", "cobalt_strike", "emotet",
-                "trickbot", "qakbot", "agent_tesla", "redline",
-                "upx_packer", "themida_packer", "darkside", "coinminer"
-            ])
-            if threat_family in ("lockbit", "darkside"):
-                size = rng.integers(120000, 450000)
-                sections = rng.integers(4, 7)
-                ep = rng.integers(0x2000, 0x9000)
-                ent = rng.uniform(7.85, 7.98) # Extreme entropy
-                has_debug = 0.0
-                has_sig = 0.0
-                imports = rng.integers(2, 14) # Stripped imports
-                exports = 0.0
-                susp = float(rng.integers(1, 3))
-                avg_sec_ent = rng.uniform(7.4, 7.85)
-                max_sec_ent = rng.uniform(7.94, 7.99)
-                min_sec_size = float(rng.choice([128, 256, 512]))
-            elif threat_family == "wannacry":
-                size = rng.integers(3400000, 3900000)
-                sections = rng.integers(4, 6)
-                ep = rng.integers(0x1000, 0x4500)
-                ent = rng.uniform(7.88, 7.97)
-                has_debug = 0.0
-                has_sig = 0.0
-                imports = rng.integers(12, 35)
-                exports = 0.0
-                susp = float(rng.integers(1, 2))
-                avg_sec_ent = rng.uniform(7.2, 7.6)
-                max_sec_ent = rng.uniform(7.94, 7.99)
-                min_sec_size = 512.0
-            elif threat_family == "cobalt_strike":
-                size = rng.integers(14000, 85000)
-                sections = rng.integers(2, 4)
-                ep = rng.integers(0x400, 0x1200)
-                ent = rng.uniform(7.82, 7.96)
-                has_debug = 0.0
-                has_sig = 0.0
-                imports = rng.integers(1, 4) # Almost no imports (dynamic resolving)
-                exports = 0.0
-                susp = float(rng.choice([0, 1]))
-                avg_sec_ent = rng.uniform(7.2, 7.7)
-                max_sec_ent = rng.uniform(7.92, 7.99)
-                min_sec_size = float(rng.choice([64, 128, 256]))
-            elif threat_family in ("emotet", "qakbot"):
-                size = rng.integers(220000, 750000)
-                sections = rng.integers(5, 8)
-                ep = rng.integers(0x3000, 0x14000)
-                ent = rng.uniform(7.72, 7.93)
-                has_debug = 0.0
-                has_sig = 0.0
-                imports = rng.integers(5, 20)
-                exports = float(rng.integers(0, 3))
-                susp = float(rng.integers(1, 2))
-                avg_sec_ent = rng.uniform(6.9, 7.6)
-                max_sec_ent = rng.uniform(7.88, 7.98)
-                min_sec_size = float(rng.choice([256, 512, 1024]))
-            elif threat_family in ("agent_tesla", "redline"):
-                size = rng.integers(350000, 950000)
-                sections = rng.integers(3, 6)
-                ep = rng.integers(0x1000, 0x5000)
-                ent = rng.uniform(7.65, 7.91)
-                has_debug = 0.0
-                has_sig = 0.0
-                imports = rng.integers(4, 16)
-                exports = 0.0
-                susp = float(rng.choice([0, 1]))
-                avg_sec_ent = rng.uniform(6.8, 7.5)
-                max_sec_ent = rng.uniform(7.85, 7.96)
-                min_sec_size = 512.0
-            else: # upx / themida / coinminer
-                size = rng.integers(60000, 800000)
-                sections = rng.integers(2, 5)
-                ep = rng.integers(0x1000, 0x25000)
-                ent = rng.uniform(7.80, 7.96)
-                has_debug = 0.0
-                has_sig = 0.0
-                imports = rng.integers(2, 8)
-                exports = 0.0
-                susp = float(rng.integers(2, 4)) # UPX0, UPX1, .themida
-                avg_sec_ent = rng.uniform(7.3, 7.8)
-                max_sec_ent = rng.uniform(7.90, 7.99)
-                min_sec_size = float(rng.choice([0, 128, 256]))
-
-            row = [
-                float(size), float(sections), float(ep), float(ent),
-                has_debug, has_sig, float(imports), float(exports),
-                susp, float(avg_sec_ent), float(max_sec_ent), min_sec_size
-            ]
-            chunk_data.append(row)
-            chunk_labels.append(1)
+        chunk_X = np.vstack([mat_clean, mat_malware])
+        chunk_y = np.empty(current_chunk, dtype=np.uint8)
+        chunk_y[:chunk_clean] = 0
+        chunk_y[chunk_clean:] = 1
 
         # Shuffle chunk
-        perm = rng.permutation(len(chunk_data))
-        chunk_arr = np.array(chunk_data, dtype=np.float32)[perm]
-        labels_arr = np.array(chunk_labels, dtype=np.uint8)[perm]
+        perm = rng.permutation(current_chunk)
+        chunk_X = chunk_X[perm]
+        chunk_y = chunk_y[perm]
 
         # Write chunk to Parquet
-        cols = [pa.array(chunk_arr[:, i]) for i in range(len(FEATURE_NAMES))]
-        cols.append(pa.array(labels_arr))
+        cols = [pa.array(chunk_X[:, i]) for i in range(len(FEATURE_NAMES))]
+        cols.append(pa.array(chunk_y))
         batch_table = pa.Table.from_arrays(cols, schema=schema)
         writer.write_table(batch_table)
+
+        del mat_clean, mat_malware, chunk_X, chunk_y, perm, cols, batch_table
+        gc.collect()
 
         generated += current_chunk
         logger.info("Streamed %d / %d samples to %s (Memory: %.1f MB)",
@@ -303,13 +313,15 @@ def load_dataset_from_parquet(
     total_rows = pf.metadata.num_rows
     logger.info("Loading %d samples from Parquet: %s", total_rows, parquet_path)
 
-    # Read table with zero unnecessary copies
     table = pf.read()
     X = np.empty((total_rows, len(FEATURE_NAMES)), dtype=np.float32)
     for i, name in enumerate(FEATURE_NAMES):
         X[:, i] = table[name].to_numpy()
 
     y = table["label"].to_numpy().astype(np.uint8)
+    del table
+    gc.collect()
+
     logger.info("Dataset loaded in memory: X=%s (%.1f MB), y=%s (%.1f MB) | Process RSS: %.1f MB",
                 X.shape, X.nbytes / (1024 * 1024), y.shape, y.nbytes / (1024 * 1024), get_current_memory_mb())
     return X, y
@@ -332,12 +344,22 @@ def train_large_scale(
         generate_parquet_dataset(parquet_file, num_samples=num_samples)
 
     X, y = load_dataset_from_parquet(parquet_file)
+    total_samples = len(X)
 
     # 2. Train / Test Split (80% train, 20% unseen test)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+    indices = np.arange(len(y))
+    idx_train, idx_test = train_test_split(
+        indices, test_size=0.2, random_state=42, stratify=y
     )
-    logger.info("Split dataset: Train=%d samples, Test=%d samples", len(X_train), len(X_test))
+    X_train = X[idx_train]
+    y_train = y[idx_train]
+    X_test = X[idx_test]
+    y_test = y[idx_test]
+    del X, y, indices, idx_train, idx_test
+    gc.collect()
+
+    logger.info("Split dataset: Train=%d samples, Test=%d samples (Memory: %.1f MB)",
+                len(X_train), len(X_test), get_current_memory_mb())
 
     # 3. Train LightGBM Classifier (Supervised Detection Engine)
     # Using 8-bit histogram binning for massive memory & speed optimization
@@ -390,7 +412,7 @@ def train_large_scale(
     duration_sec = time.time() - start_time
 
     metrics = {
-        "dataset_samples": int(len(X)),
+        "dataset_samples": int(total_samples),
         "train_samples": int(len(X_train)),
         "test_samples": int(len(X_test)),
         "accuracy": round(acc, 4),

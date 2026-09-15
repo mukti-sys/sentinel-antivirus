@@ -1,7 +1,7 @@
 {
-  "dataset_samples": 100000,
-  "train_samples": 80000,
-  "test_samples": 20000,
+  "dataset_samples": 5000000,
+  "train_samples": 4000000,
+  "test_samples": 1000000,
   "accuracy": 1.0,
   "precision": 1.0,
   "recall": 1.0,
@@ -9,14 +9,14 @@
   "roc_auc": 1.0,
   "false_positive_rate": 0.0,
   "confusion_matrix": {
-    "true_negatives": 10000,
+    "true_negatives": 500000,
     "false_positives": 0,
     "false_negatives": 0,
-    "true_positives": 10000
+    "true_positives": 500000
   },
-  "training_duration_seconds": 4.7,
-  "initial_ram_mb": 140.4,
-  "peak_ram_mb": 186.0,
+  "training_duration_seconds": 25.83,
+  "initial_ram_mb": 141.4,
+  "peak_ram_mb": 1071.3,
   "features": [
     "file_size",
     "num_sections",
