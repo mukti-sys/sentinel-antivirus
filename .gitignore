@@ -7,6 +7,10 @@ __pycache__/
 # Virtualenv
 .venv/
 
+# PyInstaller builds
+build/
+dist/
+
 # Local runtime data — NEVER commit. data/quarantine/ may hold quarantined
 # (possibly malicious) files; data/ holds the local events DB and logs.
 data/

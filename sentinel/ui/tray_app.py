@@ -310,10 +310,15 @@ class TrayApp:
     def _on_open_dashboard(self, icon=None, item=None) -> None:
         """Launch the full Sentinel GUI Dashboard."""
         import subprocess, sys
-        py_exe = sys.executable
-        pyw_exe = Path(py_exe).parent / "pythonw.exe"
-        launcher = str(pyw_exe) if pyw_exe.exists() else py_exe
         try:
+            if getattr(sys, "frozen", False):
+                gui_exe = Path(sys.executable).parent / "sentinel_gui.exe"
+                if gui_exe.exists():
+                    subprocess.Popen([str(gui_exe)])
+                    return
+            py_exe = sys.executable
+            pyw_exe = Path(py_exe).parent / "pythonw.exe"
+            launcher = str(pyw_exe) if pyw_exe.exists() else py_exe
             subprocess.Popen([launcher, "-m", "sentinel.ui.dashboard"])
         except Exception as exc:
             logger.error("Failed to launch dashboard: %s", exc)
@@ -321,10 +326,15 @@ class TrayApp:
     def _on_quick_scan(self, icon=None, item=None) -> None:
         """Launch Sentinel GUI Dashboard for immediate scan."""
         import subprocess, sys
-        py_exe = sys.executable
-        pyw_exe = Path(py_exe).parent / "pythonw.exe"
-        launcher = str(pyw_exe) if pyw_exe.exists() else py_exe
         try:
+            if getattr(sys, "frozen", False):
+                gui_exe = Path(sys.executable).parent / "sentinel_gui.exe"
+                if gui_exe.exists():
+                    subprocess.Popen([str(gui_exe)])
+                    return
+            py_exe = sys.executable
+            pyw_exe = Path(py_exe).parent / "pythonw.exe"
+            launcher = str(pyw_exe) if pyw_exe.exists() else py_exe
             subprocess.Popen([launcher, "-m", "sentinel.ui.dashboard"])
         except Exception as exc:
             logger.error("Failed to launch quick scan: %s", exc)

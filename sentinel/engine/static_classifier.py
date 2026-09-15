@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import sys
 import threading
 from collections import Counter
 from dataclasses import dataclass
@@ -233,6 +234,23 @@ def extract_pe_features(
 # PE feature model (Isolation Forest)
 # ---------------------------------------------------------------------------
 
+def _get_resource_dir(subdir: str) -> Path:
+    """Resolve resource directory supporting source tree and PyInstaller frozen runtime."""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        if hasattr(sys, "_MEIPASS"):
+            candidates.append(Path(sys._MEIPASS) / "sentinel" / subdir)
+            candidates.append(Path(sys._MEIPASS) / subdir)
+        exe_dir = Path(sys.executable).parent
+        candidates.append(exe_dir / "sentinel" / subdir)
+        candidates.append(exe_dir / subdir)
+    candidates.append(Path(__file__).resolve().parent.parent / subdir)
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[-1]
+
+
 class PEFeatureModel:
     """Lightweight anomaly detector scaffolding over PE features.
 
@@ -312,10 +330,11 @@ class PEFeatureModel:
         if self._model_path:
             candidate_paths.append(self._model_path)
         else:
-            if self._MODEL_V2_PATH.exists():
-                candidate_paths.append(self._MODEL_V2_PATH)
-            if self._DEFAULT_MODEL_PATH.exists():
-                candidate_paths.append(self._DEFAULT_MODEL_PATH)
+            data_dir = _get_resource_dir("data")
+            candidate_paths.append(data_dir / "pe_model_v2.joblib")
+            candidate_paths.append(self._MODEL_V2_PATH)
+            candidate_paths.append(data_dir / "pe_model.joblib")
+            candidate_paths.append(self._DEFAULT_MODEL_PATH)
 
         for path in candidate_paths:
             if not path.exists():
@@ -465,7 +484,9 @@ class StaticClassifier:
         if not _YARA_AVAILABLE:
             return None
         if rules_dir is None:
-            rules_dir = Path(__file__).parent.parent / "config" / "rules"
+            rules_dir = _get_resource_dir("config") / "rules"
+            if not rules_dir.exists():
+                rules_dir = Path(__file__).parent.parent / "config" / "rules"
         rules_dir = Path(rules_dir)
         yar_files = list(rules_dir.glob("*.yar"))
         if not yar_files:

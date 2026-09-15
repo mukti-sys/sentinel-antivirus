@@ -11,3 +11,4 @@ Pillow>=10.0
 numpy>=1.24
 lightgbm>=4.0
 pyarrow>=14.0
+pyinstaller>=6.0.0
