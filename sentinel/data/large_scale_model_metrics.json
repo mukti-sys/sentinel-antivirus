@@ -1,0 +1,35 @@
+{
+  "dataset_samples": 100000,
+  "train_samples": 80000,
+  "test_samples": 20000,
+  "accuracy": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1_score": 1.0,
+  "roc_auc": 1.0,
+  "false_positive_rate": 0.0,
+  "confusion_matrix": {
+    "true_negatives": 10000,
+    "false_positives": 0,
+    "false_negatives": 0,
+    "true_positives": 10000
+  },
+  "training_duration_seconds": 4.7,
+  "initial_ram_mb": 140.4,
+  "peak_ram_mb": 186.0,
+  "features": [
+    "file_size",
+    "num_sections",
+    "entry_point",
+    "file_entropy",
+    "has_debug",
+    "has_signature",
+    "num_imports",
+    "num_exports",
+    "suspicious_section_count",
+    "avg_section_entropy",
+    "max_section_entropy",
+    "min_section_raw_size"
+  ],
+  "model_architecture": "LightGBM(n_estimators=200, depth=8, leaves=63) + IsolationForest"
+}

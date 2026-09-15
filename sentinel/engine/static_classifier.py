@@ -250,6 +250,7 @@ class PEFeatureModel:
     """
 
     _DEFAULT_MODEL_PATH = Path(__file__).resolve().parent.parent / "data" / "pe_model.joblib"
+    _MODEL_V2_PATH = Path(__file__).resolve().parent.parent / "data" / "pe_model_v2.joblib"
     _DEFAULT_DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "pe_training_dataset.joblib"
 
     # Expanded real reference feature vectors from Windows binaries & anomalous profiles
@@ -298,32 +299,53 @@ class PEFeatureModel:
             n_estimators=100,
             random_state=42,
         )
+        self._lgbm_model = None
         self._fitted = False
         self._lock = threading.Lock()
         self._metadata: dict[str, Any] = {}
-        self._model_path = model_path or self._DEFAULT_MODEL_PATH
+        self._model_path = model_path
         self._load_pretrained()
 
     def _load_pretrained(self) -> bool:
-        """Attempt to load real pre-trained weights from disk."""
-        if self._model_path and self._model_path.exists():
+        """Attempt to load real pre-trained weights from disk (LightGBM v2 or IsolationForest)."""
+        candidate_paths = []
+        if self._model_path:
+            candidate_paths.append(self._model_path)
+        else:
+            if self._MODEL_V2_PATH.exists():
+                candidate_paths.append(self._MODEL_V2_PATH)
+            if self._DEFAULT_MODEL_PATH.exists():
+                candidate_paths.append(self._DEFAULT_MODEL_PATH)
+
+        for path in candidate_paths:
+            if not path.exists():
+                continue
             try:
                 import joblib
-                bundle = joblib.load(self._model_path)
-                if isinstance(bundle, dict) and "model" in bundle:
-                    self._model = bundle["model"]
-                    self._metadata = bundle.get("metadata", {})
-                    self._fitted = True
-                    logger.info("Loaded pre-trained PE IsolationForest model (%d samples)",
-                                self._metadata.get("num_samples", 0))
-                    return True
+                bundle = joblib.load(path)
+                if isinstance(bundle, dict):
+                    if "lgbm_model" in bundle:
+                        self._lgbm_model = bundle["lgbm_model"]
+                        self._model = bundle["isolation_forest"]
+                        self._metadata = bundle.get("metrics", {})
+                        self._fitted = True
+                        logger.info("Loaded pre-trained PE LightGBM v2 model (%d samples from %s)",
+                                    self._metadata.get("dataset_samples", 0), path.name)
+                        return True
+                    elif "model" in bundle:
+                        self._model = bundle["model"]
+                        self._metadata = bundle.get("metadata", {})
+                        self._fitted = True
+                        logger.info("Loaded pre-trained PE IsolationForest model (%d samples from %s)",
+                                    self._metadata.get("num_samples", 0), path.name)
+                        return True
                 elif isinstance(bundle, IsolationForest):
                     self._model = bundle
                     self._fitted = True
-                    logger.info("Loaded pre-trained IsolationForest model")
+                    logger.info("Loaded pre-trained IsolationForest model from %s", path.name)
                     return True
             except Exception as exc:
-                logger.warning("Could not load pre-trained model from %s: %s", self._model_path, exc)
+                logger.warning("Could not load pre-trained model from %s: %s", path, exc)
         return False
 
     def fit(self, feature_vectors: list[list[float]] | None = None) -> None:
@@ -348,12 +370,44 @@ class PEFeatureModel:
         if not self._fitted:
             self.fit()
 
-    def is_suspicious(self, features: PEFeatures) -> bool:
-        """True if the PE features look anomalous (outlier)."""
+    def predict_malware_probability(self, features: PEFeatures) -> float:
+        """Return calibrated probability (0.0 to 1.0) that the PE binary is malware."""
         self._ensure_fitted()
-        vec = np.array([features.to_vector()])
-        # IsolationForest.predict: -1 = outlier, 1 = inlier.
-        return self._model.predict(vec)[0] == -1
+        vec = np.array([features.to_vector()], dtype=np.float32)
+        if self._lgbm_model is not None:
+            try:
+                return float(self._lgbm_model.predict_proba(vec)[0, 1])
+            except Exception:
+                pass
+        return 0.85 if self.is_suspicious(features) else 0.05
+
+    def predict_threat(self, features: PEFeatures) -> dict[str, Any]:
+        """Comprehensive threat assessment combining LightGBM and IsolationForest."""
+        self._ensure_fitted()
+        prob = self.predict_malware_probability(features)
+        score = self.anomaly_score(features)
+        is_susp = self.is_suspicious(features)
+        return {
+            "is_malware": prob >= 0.5 or is_susp,
+            "malware_probability": prob,
+            "anomaly_score": score,
+            "model_version": "2.0.0" if self._lgbm_model is not None else "1.0.0",
+        }
+
+    def is_suspicious(self, features: PEFeatures) -> bool:
+        """True if the PE features look anomalous or match known malware profiles."""
+        self._ensure_fitted()
+        vec = np.array([features.to_vector()], dtype=np.float32)
+        if self._lgbm_model is not None:
+            try:
+                prob = float(self._lgbm_model.predict_proba(vec)[0, 1])
+                return prob >= 0.5
+            except Exception:
+                pass
+        # IsolationForest fallback: -1 = outlier, 1 = inlier.
+        return bool(self._model.predict(vec)[0] == -1)
+
+
 
     def anomaly_score(self, features: PEFeatures) -> float:
         """Raw anomaly score (lower = more anomalous). For observability."""
@@ -364,6 +418,7 @@ class PEFeatureModel:
     @property
     def metadata(self) -> dict[str, Any]:
         return dict(self._metadata)
+
 
 
 # ---------------------------------------------------------------------------

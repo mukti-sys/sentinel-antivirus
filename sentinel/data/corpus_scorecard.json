@@ -1,9 +1,9 @@
 {
-  "timestamp": "2026-09-14T19:39:25.844Z",
+  "timestamp": "2026-09-15T06:11:45.913Z",
   "total_families": 8,
   "yara_detections": 6,
   "hash_blocklist_detections": 8,
-  "pe_ml_anomalies": 7,
+  "pe_ml_anomalies": 8,
   "dynamic_containments": 8,
   "results": [
     {
@@ -66,7 +66,7 @@
       "sha256": "fa01b3b28b7a66b9338f060716bfb4c810d7249dc6b2bdfaa73c38db5cc5c464",
       "yara": true,
       "hash_blocklist": true,
-      "ml_anomaly": false,
+      "ml_anomaly": true,
       "containment": true
     },
     {
