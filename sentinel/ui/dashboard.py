@@ -77,9 +77,11 @@ class SentinelDashboard(tk.Tk):
 
         # Core engine components
         self.quarantine_store = quarantine_store or QuarantineStore()
+        self._safe_audit_mode_var = tk.BooleanVar(value=True)
         self.scanner = scanner or OnDemandScanner(
             quarantine_store=self.quarantine_store,
-            auto_quarantine=True,
+            auto_quarantine=False,
+            read_only_mode=True,
         )
         self.memory_scanner = MemoryScanner()
         self.sandbox_runner = SandboxRunner()
@@ -531,6 +533,34 @@ class SentinelDashboard(tk.Tk):
         )
         self.btn_run_custom.pack(side="left")
 
+        # Scan Safety Options Bar (Audit Mode / Safe Mode)
+        opts_bar = tk.Frame(frame, bg=COLOR_BG_DARK)
+        opts_bar.pack(fill="x", pady=(0, 14))
+
+        self.chk_safe_mode = tk.Checkbutton(
+            opts_bar,
+            text="🛡️ Safe Mode / Audit-Only: Report threats without moving or deleting any files",
+            variable=self._safe_audit_mode_var,
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_ACCENT_GREEN,
+            selectcolor=COLOR_SURFACE,
+            activebackground=COLOR_BG_DARK,
+            activeforeground=COLOR_ACCENT_GREEN,
+            cursor="hand2",
+            command=self._on_toggle_safe_mode,
+        )
+        self.chk_safe_mode.pack(side="left")
+
+        self.lbl_safe_mode_hint = tk.Label(
+            opts_bar,
+            text="[Active: Files are 100% untouched]",
+            font=("Segoe UI", 8),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_ACCENT_GREEN,
+        )
+        self.lbl_safe_mode_hint.pack(side="left", padx=(10, 0))
+
         # Progress / Status Panel
         self.progress_panel = tk.Frame(
             frame,
@@ -631,7 +661,7 @@ class SentinelDashboard(tk.Tk):
         self.tree_scan.column("file", width=180)
         self.tree_scan.column("threat", width=160)
         self.tree_scan.column("score", width=100, anchor="center")
-        self.tree_scan.column("status", width=120, anchor="center")
+        self.tree_scan.column("status", width=180, anchor="center")
         self.tree_scan.column("path", width=340)
 
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_scan.yview)
@@ -639,6 +669,36 @@ class SentinelDashboard(tk.Tk):
 
         self.tree_scan.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        # Action Bar Below Table
+        action_bar = tk.Frame(frame, bg=COLOR_BG_DARK)
+        action_bar.pack(fill="x", pady=(10, 0))
+
+        self.btn_quarantine_selected = tk.Button(
+            action_bar,
+            text="🔒 Quarantine Selected File",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_PRIMARY,
+            activebackground=COLOR_SURFACE_HOVER,
+            activeforeground=COLOR_TEXT_PRIMARY,
+            bd=1,
+            relief="solid",
+            highlightbackground=COLOR_CARD_BORDER,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self._on_quarantine_scan_selected,
+        )
+        self.btn_quarantine_selected.pack(side="left")
+
+        tk.Label(
+            action_bar,
+            text="Safe Mode is Active: Detected files remain untouched unless you choose to quarantine them.",
+            font=("Segoe UI", 8),
+            bg=COLOR_BG_DARK,
+            fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(12, 0))
 
         return frame
 
@@ -712,18 +772,92 @@ class SentinelDashboard(tk.Tk):
     def _set_scanning_ui_state(self, is_scanning: bool, title: str = "") -> None:
         self._scan_active = is_scanning
         if is_scanning:
+            self.scanner.read_only_mode = self._safe_audit_mode_var.get()
+            self.scanner.auto_quarantine = not self._safe_audit_mode_var.get()
             self.lbl_scan_state.config(text=title, fg=COLOR_ACCENT_BLUE)
             self.btn_cancel_scan.config(state="normal")
             self.btn_run_quick.config(state="disabled")
             self.btn_run_full.config(state="disabled")
             self.btn_run_custom.config(state="disabled")
+            self.chk_safe_mode.config(state="disabled")
             self.prog_bar.start(10)
         else:
             self.btn_cancel_scan.config(state="disabled")
             self.btn_run_quick.config(state="normal")
             self.btn_run_full.config(state="normal")
             self.btn_run_custom.config(state="normal")
+            self.chk_safe_mode.config(state="normal")
             self.prog_bar.stop()
+
+    def _on_toggle_safe_mode(self) -> None:
+        safe = self._safe_audit_mode_var.get()
+        if safe:
+            self.scanner.read_only_mode = True
+            self.scanner.auto_quarantine = False
+            self.chk_safe_mode.config(fg=COLOR_ACCENT_GREEN, activeforeground=COLOR_ACCENT_GREEN)
+            self.lbl_safe_mode_hint.config(text="[Active: Files are 100% untouched]", fg=COLOR_ACCENT_GREEN)
+        else:
+            if not messagebox.askyesno(
+                "Disable Safe Mode?",
+                "WARNING: If Safe Mode is turned OFF, Sentinel will automatically move any detected threats or false positives into the Quarantine Vault.\n\nAre you sure you want to enable automatic quarantine?",
+            ):
+                self._safe_audit_mode_var.set(True)
+                return
+            self.scanner.read_only_mode = False
+            self.scanner.auto_quarantine = True
+            self.chk_safe_mode.config(fg=COLOR_ACCENT_YELLOW, activeforeground=COLOR_ACCENT_YELLOW)
+            self.lbl_safe_mode_hint.config(text="[Auto-Quarantine ACTIVE: Detected files will be isolated]", fg=COLOR_ACCENT_YELLOW)
+
+    def _on_quarantine_scan_selected(self) -> None:
+        sel = self.tree_scan.selection()
+        if not sel:
+            messagebox.showinfo("Quarantine", "Please select a detected file from the table first.")
+            return
+        item = self.tree_scan.item(sel[0])
+        values = item.get("values", [])
+        if len(values) < 5:
+            return
+        file_name, threat_name, score_str, status_str, full_path_str = values[:5]
+        if status_str == "Quarantined":
+            messagebox.showinfo("Quarantine", f"'{file_name}' is already quarantined.")
+            return
+
+        if full_path_str.startswith("[Memory") or "[Memory" in file_name:
+            messagebox.showinfo(
+                "Process Memory Threat",
+                f"This threat resides in active volatile memory: {file_name}.\n\nIn-memory process threads cannot be moved into a physical file quarantine vault.\n\nTo remediate, terminate or restart the host process via Windows Task Manager or Sentinel Service.",
+            )
+            return
+
+        target_file = Path(full_path_str)
+        if not target_file.exists():
+            messagebox.showerror("Quarantine Error", f"File not found: {full_path_str}")
+            return
+
+        if not messagebox.askyesno(
+            "Confirm Quarantine",
+            f"Are you sure you want to isolate and quarantine this file?\n\nFile: {file_name}\nThreat: {threat_name}\nPath: {full_path_str}\n\nThe file will be safely moved into Sentinel's Quarantine Vault.",
+        ):
+            return
+
+        try:
+            score = float(score_str) if score_str else 75.0
+            rec = self.quarantine_store.add(
+                source_path=target_file,
+                subject=f"file:{target_file.name}",
+                reason=f"Manual: {threat_name}",
+                score=score,
+            )
+            if rec is not None:
+                new_values = list(values)
+                new_values[3] = "Quarantined"
+                self.tree_scan.item(sel[0], values=new_values)
+                messagebox.showinfo(
+                    "Quarantine Success",
+                    f"Successfully isolated '{file_name}' into Quarantine Vault.\nQuarantine ID: {rec.id[:8]}",
+                )
+        except Exception as e:
+            messagebox.showerror("Quarantine Failed", f"Failed to quarantine file: {e}")
 
     def _on_scan_progress_threadsafe(self, prog: ScanProgress) -> None:
         # Marshall to Tk main thread
@@ -744,12 +878,18 @@ class SentinelDashboard(tk.Tk):
 
     def _add_threat_row(self, threat: ThreatDetection) -> None:
         self._last_threats.append(threat)
-        status_text = "Quarantined" if threat.quarantined else "Detected"
+        if threat.is_memory:
+            status_text = "Detected (In-Memory RAM)"
+            display_name = f"🧠 {threat.file_path.name}"
+        else:
+            status_text = "Quarantined" if threat.quarantined else "Detected (Untouched)"
+            display_name = threat.file_path.name
+
         self.tree_scan.insert(
             "",
             "end",
             values=(
-                threat.file_path.name,
+                display_name,
                 threat.threat_name,
                 f"{threat.score:.0f}",
                 status_text,
@@ -772,13 +912,22 @@ class SentinelDashboard(tk.Tk):
                 text=f"Inspected {summary.files_scanned} files in {duration_str}. Your system is clean."
             )
         else:
-            self.lbl_scan_state.config(
-                text=f"Scan Complete — {summary.threats_found} Threat(s) Isolated ⚠️",
-                fg=COLOR_ACCENT_RED,
-            )
-            self.lbl_scan_current_file.config(
-                text=f"Scanned {summary.files_scanned} files in {duration_str}. Threats moved to Quarantine Vault."
-            )
+            if self.scanner.auto_quarantine:
+                self.lbl_scan_state.config(
+                    text=f"Scan Complete — {summary.threats_found} Threat(s) Isolated ⚠️",
+                    fg=COLOR_ACCENT_RED,
+                )
+                self.lbl_scan_current_file.config(
+                    text=f"Scanned {summary.files_scanned} files in {duration_str}. Threats moved to Quarantine Vault."
+                )
+            else:
+                self.lbl_scan_state.config(
+                    text=f"Scan Complete — {summary.threats_found} Item(s) Detected (Safe Mode: Untouched) ⚠️",
+                    fg=COLOR_ACCENT_YELLOW,
+                )
+                self.lbl_scan_current_file.config(
+                    text=f"Scanned {summary.files_scanned} files in {duration_str}. All files remain safely intact in their original locations."
+                )
 
     # ------------------------------------------------------------------ #
     # Tab 3: Quarantine Vault

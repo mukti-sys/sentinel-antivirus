@@ -19,7 +19,9 @@ import ctypes
 from ctypes import wintypes
 import logging
 import os
+import struct
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,22 +61,51 @@ EXECUTABLE_PROTECTIONS = frozenset({
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
 
-# Known JIT / Interpreter processes that legitimately allocate executable private pages.
-# These are exempted from basic unbacked warnings unless shellcode/PE headers are detected.
-_KNOWN_JIT_PROCESSES = frozenset({
-    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
-    "python.exe", "pythonw.exe", "node.exe", "code.exe",
-    "devenv.exe", "java.exe", "javaw.exe",
+# Known JIT / Interpreter / Runtime process names (fast path)
+_KNOWN_JIT_NAMES = frozenset({
+    "powershell.exe", "pwsh.exe", "chrome.exe", "msedge.exe", "firefox.exe",
+    "brave.exe", "python.exe", "pythonw.exe", "node.exe", "code.exe",
+    "devenv.exe", "java.exe", "javaw.exe", "slack.exe", "discord.exe",
+    "teams.exe", "spotify.exe", "robloxplayerbeta.exe", "roblox.exe",
 })
 
-# Shellcode signatures / suspicious byte prologues
-_SHELLCODE_PATTERNS = [
-    (b"\xfc\xe8", "CobaltStrike/Metasploit cld;call prologue"),
-    (b"\xeb\xfe", "Infinite loop shellcode stub / debug trap"),
-    (b"\x48\x83\xec", "x64 stack allocation prologue in unbacked memory"),
-    (b"\x55\x8b\xec", "x86 standard stack frame prologue in unbacked memory"),
-    (b"\x31\xc0\x50\x68", "Classic win32 shellcode xor-eax / push string pattern"),
-    (b"\x90\x90\x90\x90\x90\x90\x90\x90", "NOP sled"),
+# Known managed runtime and JIT modules (deep path for arbitrary .NET apps, Unity, Electron, etc.)
+_MANAGED_MODULE_PATTERNS = frozenset({
+    "clr.dll", "clrjit.dll", "coreclr.dll", "mscorwks.dll",
+    "mscoreei.dll", "mscoree.dll", "mono.dll", "mono-2.0-bdwgc.dll",
+    "monosgen-2.0.dll", "v8.dll", "node.dll", "jvm.dll",
+})
+
+# Authentic adversary shellcode signatures (Cobalt Strike, Metasploit, PEB walks, Egghunters)
+_SHELLCODE_PATTERNS: list[tuple[bytes, str]] = [
+    # Metasploit / Cobalt Strike Windows API Hash Stagers
+    (b"\xfc\x48\x83\xe4\xf0\xe8", "Metasploit x64 reverse stager (cld; and rsp, -16; call)"),
+    (b"\xfc\xe8\x82\x00\x00\x00\x60", "Metasploit x86 reverse stager (cld; call; pushad)"),
+    (b"\xfc\xe8\x89\x00\x00\x00\x60", "Cobalt Strike / Metasploit x86 stager (cld; call; pushad)"),
+    (b"\xfc\x48\x89\xe5\x48\x81\xec", "Cobalt Strike Beacon x64 stager prologue"),
+
+    # x64 PEB Address Resolution (Adversary dynamic import resolution)
+    (b"\x65\x48\x8b\x04\x25\x60\x00\x00\x00", "x64 shellcode PEB resolution (mov rax, gs:[0x60])"),
+    (b"\x65\x48\x8b\x1c\x25\x60\x00\x00\x00", "x64 shellcode PEB resolution (mov rbx, gs:[0x60])"),
+    (b"\x65\x48\x8b\x14\x25\x60\x00\x00\x00", "x64 shellcode PEB resolution (mov rdx, gs:[0x60])"),
+    (b"\x65\x48\x8b\x0c\x25\x60\x00\x00\x00", "x64 shellcode PEB resolution (mov rcx, gs:[0x60])"),
+    (b"\x65\x48\x8b\x34\x25\x60\x00\x00\x00", "x64 shellcode PEB resolution (mov rsi, gs:[0x60])"),
+    (b"\x65\x48\x8b\x3c\x25\x60\x00\x00\x00", "x64 shellcode PEB resolution (mov rdi, gs:[0x60])"),
+    (b"\x65\x48\x8b\x40\x60", "x64 compact shellcode PEB resolution (gs:[rax+0x60])"),
+    (b"\x65\x48\x8b\x52\x60", "x64 compact shellcode PEB resolution (gs:[rdx+0x60])"),
+
+    # x86 PEB Address Resolution
+    (b"\x64\xa1\x30\x00\x00\x00", "x86 shellcode PEB resolution (mov eax, fs:[0x30])"),
+    (b"\x64\x8b\x15\x30\x00\x00\x00", "x86 shellcode PEB resolution (mov edx, fs:[0x30])"),
+    (b"\x64\x8b\x0d\x30\x00\x00\x00", "x86 shellcode PEB resolution (mov ecx, fs:[0x30])"),
+    (b"\x64\x8b\x1d\x30\x00\x00\x00", "x86 shellcode PEB resolution (mov ebx, fs:[0x30])"),
+    (b"\x64\x8b\x35\x30\x00\x00\x00", "x86 shellcode PEB resolution (mov esi, fs:[0x30])"),
+
+    # Egghunter stagers
+    (b"\x66\x81\xca\xff\x0f\x42\x52\x6a\x02\x58\xcd\x2e", "Windows NtAccessCheckAndAuditAlarm Syscall egghunter"),
+
+    # NOP sled (>= 16 consecutive NOPs in unbacked execution page)
+    (b"\x90" * 16, "Unbacked execution NOP sled (>= 16 consecutive NOPs)"),
 ]
 
 
@@ -166,6 +197,8 @@ class MemoryScanner:
     def __init__(self) -> None:
         self._is_windows = sys.platform == "win32"
         self._kernel32 = None
+        self._managed_pid_cache: dict[int, bool] = {}
+        self._cache_lock = threading.Lock()
         if self._is_windows:
             try:
                 self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -181,6 +214,59 @@ class MemoryScanner:
                 self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
             except Exception as exc:
                 logger.warning("Could not load kernel32 for MemoryScanner: %s", exc)
+
+    def _is_managed_process(self, pid: int, proc_name: str) -> bool:
+        """Dynamically detect if a process hosts a managed runtime / JIT engine."""
+        if proc_name.lower() in _KNOWN_JIT_NAMES:
+            return True
+
+        with self._cache_lock:
+            if pid in self._managed_pid_cache:
+                return self._managed_pid_cache[pid]
+
+        is_managed = False
+        try:
+            import psutil
+            p = psutil.Process(pid)
+            for m in p.memory_maps():
+                if m.path:
+                    dll_name = m.path.split("\\")[-1].lower()
+                    if dll_name in _MANAGED_MODULE_PATTERNS or any(k in dll_name for k in ("clrjit", "coreclr", "mscorlib")):
+                        is_managed = True
+                        break
+        except Exception:
+            pass
+
+        with self._cache_lock:
+            self._managed_pid_cache[pid] = is_managed
+        return is_managed
+
+    @staticmethod
+    def _check_reflective_pe(sample: bytes) -> bool:
+        """Strict verification of an in-memory Portable Executable (PE) header.
+        
+        Requires:
+        1. DOS header signature 'MZ' at offset 0
+        2. Valid e_lfanew pointer at offset 0x3C (0x40 <= e_lfanew <= 0x1000)
+        3. PE signature 'PE\\0\\0' at sample[e_lfanew : e_lfanew + 4]
+        4. Valid PE machine type (IMAGE_FILE_MACHINE_AMD64 / I386 / ARM64)
+        """
+        if len(sample) < 0x40 or not sample.startswith(b"MZ"):
+            return False
+        try:
+            e_lfanew = struct.unpack_from("<I", sample, 0x3C)[0]
+            if 0x40 <= e_lfanew <= min(len(sample) - 4, 0x1000):
+                if sample[e_lfanew : e_lfanew + 4] == b"PE\0\0":
+                    if len(sample) >= e_lfanew + 6:
+                        machine = struct.unpack_from("<H", sample, e_lfanew + 4)[0]
+                        # 0x014c (i386), 0x8664 (x64), 0xaa64 (arm64)
+                        if machine in (0x014C, 0x8664, 0xAA64):
+                            return True
+                    else:
+                        return True
+        except Exception:
+            pass
+        return False
 
     def scan_process(
         self,
@@ -220,7 +306,7 @@ class MemoryScanner:
         mbi = MEMORY_BASIC_INFORMATION()
         address = 0
         total_scanned = 0
-        is_jit = proc_name.lower() in _KNOWN_JIT_PROCESSES
+        is_jit = self._is_managed_process(pid, proc_name)
 
         while True:
             res = self._kernel32.VirtualQueryEx(
@@ -253,10 +339,10 @@ class MemoryScanner:
 
             # Analyze committed executable private memory
             if region.is_unbacked_executable:
-                sample = self._read_memory_bytes(h_process, addr_val, min(region_size, 512))
+                sample = self._read_memory_bytes(h_process, addr_val, min(region_size, 1024))
 
-                # Check 1: Reflective PE injection (MZ header inside unbacked private region)
-                if sample.startswith(b"MZ"):
+                # Check 1: Reflective PE injection (verified MZ + PE header in unbacked memory)
+                if self._check_reflective_pe(sample):
                     threats.append(
                         MemoryThreat(
                             pid=pid,
@@ -264,14 +350,17 @@ class MemoryScanner:
                             base_address=addr_val,
                             size=region_size,
                             threat_type="reflective_pe",
-                            description="Reflective DLL injected into unbacked private memory (embedded MZ header)",
-                            confidence=0.95,
+                            description="Reflective DLL injected into unbacked private memory (embedded verified PE header)",
+                            confidence=0.98,
+                            protection=protect,
                             sample_bytes=sample[:32],
                         )
                     )
 
-                # Check 2: Known shellcode prologues
+                # Check 2: Known authentic shellcode signatures
                 for pattern, desc in _SHELLCODE_PATTERNS:
+                    if is_jit and "PEB resolution" in desc:
+                        continue
                     if pattern in sample:
                         threats.append(
                             MemoryThreat(
@@ -281,14 +370,15 @@ class MemoryScanner:
                                 size=region_size,
                                 threat_type="shellcode_signature",
                                 description=f"Shellcode signature detected: {desc}",
-                                confidence=0.90,
+                                confidence=0.95,
+                                protection=protect,
                                 sample_bytes=sample[:32],
                             )
                         )
                         break
 
                 # Check 3: Raw unbacked executable region in non-JIT processes
-                if not is_jit and (protect & PAGE_EXECUTE_READWRITE):
+                if not is_jit and (protect & (PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)):
                     threats.append(
                         MemoryThreat(
                             pid=pid,
@@ -297,7 +387,8 @@ class MemoryScanner:
                             size=region_size,
                             threat_type="unbacked_executable",
                             description="Anomalous PAGE_EXECUTE_READWRITE unbacked private memory in non-JIT process",
-                            confidence=0.75,
+                            confidence=0.80,
+                            protection=protect,
                             sample_bytes=sample[:32],
                         )
                     )

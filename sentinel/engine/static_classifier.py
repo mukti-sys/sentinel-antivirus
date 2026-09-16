@@ -59,9 +59,9 @@ logger = logging.getLogger(__name__)
 _MZ_MAGIC = b"MZ"
 
 # Section names that are suspicious when found in a PE (packers, injectors,
-# custom sections). Not exhaustive — a refinement target for FP tuning.
+# custom sections). Note: .ndata is standard NSIS installer data and excluded.
 _SUSPICIOUS_SECTION_NAMES = frozenset({
-    ".ndata", ".packed", "UPX0", "UPX1", "UPX2", ".themida", ".vmp0",
+    ".packed", "UPX0", "UPX1", "UPX2", ".themida", ".vmp0",
     ".vmp1", ".aspack", ".adata", ".petite",
 })
 
@@ -611,21 +611,26 @@ class StaticClassifier:
                 return signals
 
             if self.pe_model.is_suspicious(pe_features):
-                score = self.pe_model.anomaly_score(pe_features)
-                signals.append(Signal(
-                    kind="vt_unknown_suspicious_pe",
-                    subject=subject,
-                    engine="static_classifier",
-                    reason=(
-                        f"suspicious PE features in {file_path.name} "
-                        f"(anomaly_score={score:.3f}, "
-                        f"sections={pe_features.num_sections}, "
-                        f"entropy={pe_features.file_entropy:.2f}, "
-                        f"imports={pe_features.num_imports}, "
-                        f"signed={pe_features.has_signature}, "
-                        f"suspicious_sections={pe_features.suspicious_section_count})"
-                    ),
-                ))
+                # If binary has a verified Authenticode signature from a trusted Root CA and no packer sections,
+                # exempt from generic anomaly flag to prevent false alarms on commercial software
+                if pe_features.has_signature and pe_features.suspicious_section_count == 0:
+                    pass
+                else:
+                    score = self.pe_model.anomaly_score(pe_features)
+                    signals.append(Signal(
+                        kind="vt_unknown_suspicious_pe",
+                        subject=subject,
+                        engine="static_classifier",
+                        reason=(
+                            f"suspicious PE features in {file_path.name} "
+                            f"(anomaly_score={score:.3f}, "
+                            f"sections={pe_features.num_sections}, "
+                            f"entropy={pe_features.file_entropy:.2f}, "
+                            f"imports={pe_features.num_imports}, "
+                            f"signed={pe_features.has_signature}, "
+                            f"suspicious_sections={pe_features.suspicious_section_count})"
+                        ),
+                    ))
 
         return signals
 

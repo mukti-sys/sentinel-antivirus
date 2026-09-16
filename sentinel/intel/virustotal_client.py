@@ -174,6 +174,7 @@ class VirusTotalClient:
         # Exponential backoff state
         self._backoff_seconds: float = 0.0
         self._backoff_until: float = 0.0
+        self._offline_until: float = 0.0
 
         # Telemetry metrics
         self.total_queries: int = 0
@@ -315,6 +316,10 @@ class VirusTotalClient:
         if not self.enabled:
             return None
 
+        # Offline circuit-breaker: bypass network call immediately when disconnected
+        if time.time() < self._offline_until:
+            return None
+
         self.total_queries += 1
         acquired = self._wait_for_rate_limit(timeout=30.0)
         if not acquired:
@@ -324,10 +329,12 @@ class VirusTotalClient:
         url = _VT_API.format(hash=h)
         headers = {"x-apikey": self.api_key, "Accept": "application/json"}
         try:
-            resp = self._session.get(url, headers=headers, timeout=30)
+            resp = self._session.get(url, headers=headers, timeout=5.0)
         except requests.RequestException as exc:
             self.network_errors += 1
-            logger.warning("VirusTotal lookup failed for %s: %s", h[:12], exc)
+            # Trip offline circuit breaker for 60s to prevent stalling local scans
+            self._offline_until = time.time() + 60.0
+            logger.warning("VirusTotal lookup failed (host offline, bypassing for 60s) for %s: %s", h[:12], exc)
             return None
 
         if resp.status_code == 404:

@@ -47,19 +47,39 @@ def check_prerequisites() -> bool:
     return True
 
 
+def _force_remove_tree(path: Path) -> None:
+    """Recursively remove a directory tree, clearing read-only attributes on Windows."""
+    if not path.exists():
+        return
+    import stat
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["attrib", "-r", "-s", "-h", f"{path}\\*", "/s", "/d"], capture_output=True)
+            subprocess.run(["attrib", "-r", "-s", "-h", str(path)], capture_output=True)
+        except Exception:
+            pass
+
+    def _on_error(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(path, onerror=_on_error)
+    except Exception as exc:
+        print(f"    [!] Warning removing {path}: {exc}")
+
+
 def clean_previous_builds() -> None:
     """Remove previous build and dist artifacts."""
     print("[*] Cleaning previous build artifacts...")
     if BUILD_DIR.exists():
-        try:
-            shutil.rmtree(BUILD_DIR)
-        except Exception as exc:
-            print(f"    [!] Could not cleanly remove {BUILD_DIR}: {exc}")
+        _force_remove_tree(BUILD_DIR)
     if SENTINEL_DIST.exists():
-        try:
-            shutil.rmtree(SENTINEL_DIST)
-        except Exception as exc:
-            print(f"    [!] Could not cleanly remove {SENTINEL_DIST}: {exc}")
+        _force_remove_tree(SENTINEL_DIST)
+
 
 
 def run_pyinstaller() -> bool:

@@ -90,6 +90,8 @@ class ThreatDetection:
     timestamp: float = field(default_factory=time.time)
     quarantined: bool = False
     quarantine_id: str | None = None
+    is_memory: bool = False
+    process_id: int = 0
 
 
 @dataclass
@@ -133,10 +135,15 @@ class OnDemandScanner:
         quarantine_store: QuarantineStore | None = None,
         rules_dir: str | Path | None = None,
         auto_quarantine: bool = False,
+        read_only_mode: bool | None = None,
     ) -> None:
         self.classifier = classifier or StaticClassifier(yara_rules_dir=rules_dir)
         self.quarantine_store = quarantine_store
         self.auto_quarantine = auto_quarantine
+        if read_only_mode is None:
+            self.read_only_mode = not auto_quarantine
+        else:
+            self.read_only_mode = read_only_mode
         self.memory_scanner = MemoryScanner()
 
         self._status = ScanStatus.IDLE
@@ -277,8 +284,8 @@ class OnDemandScanner:
                     except Exception:
                         pass
 
-                    # Genuine structural anomalies: known packer sections or extreme entropy without Authenticode signature
-                    if features.suspicious_section_count > 0:
+                    # Genuine structural anomalies: unsigned binaries with known packer sections or extreme entropy
+                    if features.suspicious_section_count > 0 and not features.has_signature and not is_system_binary:
                         threat = ThreatDetection(
                             file_path=file_path,
                             sha256=sha256,
@@ -286,7 +293,7 @@ class OnDemandScanner:
                             score=75.0,
                             severity=ThreatSeverity.HIGH,
                             engine="pe_classifier",
-                            description=f"PE binary contains {features.suspicious_section_count} suspicious/packer section(s)",
+                            description=f"Unsigned PE binary contains {features.suspicious_section_count} suspicious/packer section(s)",
                         )
                     elif features.max_section_entropy > 7.85 and not features.has_signature and not is_system_binary:
                         threat = ThreatDetection(
@@ -299,8 +306,8 @@ class OnDemandScanner:
                             description=f"Unsigned PE section with extreme entropy ({features.max_section_entropy:.2f} bits/byte)",
                         )
 
-        # Optional auto-quarantine
-        if threat and self.auto_quarantine and self.quarantine_store:
+        # Optional auto-quarantine (strictly inhibited when read_only_mode is active or for memory threats)
+        if threat and not threat.is_memory and not self.read_only_mode and self.auto_quarantine and self.quarantine_store:
             try:
                 rec = self.quarantine_store.add(
                     source_path=file_path,
@@ -481,19 +488,24 @@ class OnDemandScanner:
                 try:
                     mem_threats = self.memory_scanner.scan_all_processes()
                     for mt in mem_threats:
+                        # Quick Scan memory gate: only alert on high-confidence reflective DLLs or verified shellcode
+                        if mt.threat_type not in ("reflective_pe", "shellcode_signature"):
+                            continue
                         severity = (
                             ThreatSeverity.CRITICAL
-                            if mt.threat_type in ("reflective_pe", "shellcode_signature")
+                            if mt.threat_type == "reflective_pe"
                             else ThreatSeverity.HIGH
                         )
                         det = ThreatDetection(
-                            file_path=Path(f"PID_{mt.pid}_{mt.process_name}"),
+                            file_path=Path(f"[Memory: {mt.process_name} (PID {mt.pid})]"),
                             sha256="",
                             threat_name=f"Memory.{mt.threat_type}",
                             score=90.0,
                             severity=severity,
                             engine="memory_scanner",
                             description=mt.description,
+                            is_memory=True,
+                            process_id=mt.pid,
                         )
                         threats.append(det)
                         progress.threats_found += 1
