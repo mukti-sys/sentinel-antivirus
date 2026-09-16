@@ -385,22 +385,25 @@ def _run_as_service() -> None:
 
     # Handle install/start/stop/remove commands.
     if len(sys.argv) == 1:
-        # Started by the SCM.
-        servicemanager.Initialize()
-        servicemanager.PrepareToHostSingle(SentinelService)
-        servicemanager.StartServiceCtrlDispatcher()
+        # Started by the SCM (or fallback to standalone if run directly without SCM).
+        try:
+            servicemanager.Initialize()
+            servicemanager.PrepareToHostSingle(SentinelService)
+            servicemanager.StartServiceCtrlDispatcher()
+        except Exception as exc:
+            logger.info("Not running under SCM controller (%s), starting standalone orchestrator.", exc)
+            orch = SentinelOrchestrator()
+            try:
+                orch.start()
+            except KeyboardInterrupt:
+                orch.stop()
     else:
         win32serviceutil.HandleCommandLine(SentinelService)
 
 
 def main() -> int:
-    """Entry point: run as service if invoked with service commands,
+    """Entry point: run as service if invoked by SCM or with service commands,
     otherwise run standalone."""
-    service_cmds = {"install", "start", "stop", "remove", "restart", "update"}
-    if len(sys.argv) > 1 and sys.argv[1] in service_cmds:
-        _run_as_service()
-        return 0
-
     if "--standalone" in sys.argv:
         # Run the orchestrator directly (for development/testing).
         logging.basicConfig(
@@ -414,16 +417,20 @@ def main() -> int:
             orch.stop()
         return 0
 
-    print(f"Sentinel Service ({SERVICE_NAME})")
-    print()
-    print("Service commands (elevated terminal required):")
-    print(f"  python -m sentinel.service install")
-    print(f"  python -m sentinel.service start")
-    print(f"  python -m sentinel.service stop")
-    print(f"  python -m sentinel.service remove")
-    print()
-    print("Development mode:")
-    print(f"  python -m sentinel.service --standalone")
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(f"Sentinel Service ({SERVICE_NAME})")
+        print()
+        print("Service commands (elevated terminal required):")
+        print(f"  python -m sentinel.service install")
+        print(f"  python -m sentinel.service start")
+        print(f"  python -m sentinel.service stop")
+        print(f"  python -m sentinel.service remove")
+        print()
+        print("Development mode:")
+        print(f"  python -m sentinel.service --standalone")
+        return 0
+
+    _run_as_service()
     return 0
 
 
