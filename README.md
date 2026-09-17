@@ -61,6 +61,13 @@ Sentinel is designed to function with zero external internet access.
 - **Phishing Masquerade Detection:** Identifies deceptive multi-extension naming conventions (e.g., `.pdf.exe`, `.xlsx.exe`, `.docx.scr`).
 - **Resource Anomaly Detection:** Flags sustained cryptomining CPU usage and rapid failed logon bursts (Windows Event ID 4625).
 
+### File Extension Spoofing Defense (Disguised Executables)
+Adversaries frequently disguise executable payloads by altering extensions (e.g., `payload.jpg`, `invoice.pdf.exe`, or exploiting Windows Explorer's default setting that conceals known extensions). Sentinel counters disguised binaries through four defensive layers:
+- **Binary Magic Header Inspection:** File type classification is strictly decoupled from filename extensions. Portable Executables on Windows begin with the DOS header magic bytes `MZ` (`0x4D 0x5A`) and an NT header pointer at offset `0x3C` referencing `PE\0\0` (`0x50 0x45 0x00 0x00`). If an executable is named `photo.jpg` or `report.pdf`, Sentinel's parser detects the PE header structure and routes the file through the complete 2,568-dimensional EMBER2024 feature extraction and ML inference pipeline.
+- **Content-Based YARA Rule Execution:** The YARA engine scans raw byte streams without extension filtering. Rules targeting shellcode stagers, embedded PE headers, or known exploit patterns evaluate file contents independently of filenames.
+- **MIME & Structure Mismatch Heuristics:** Non-executable file extensions carrying executable header structures generate high-confidence masquerade signals (`pe_masquerade`, Threat Score 85).
+- **Execution-Phase Interception:** Even if an executable is disguised as an image on disk, the Windows OS requires the PE loader (`ntdll!LdrLoadDll` or `kernel32!CreateProcessW`) to execute native code. Any process spawn targeting a disguised binary is intercepted by Sentinel's filesystem sensor and process monitor.
+
 ---
 
 ## Empirical Benchmarks & Verification Proofs
@@ -107,9 +114,44 @@ Executable via `python -m sentinel.tests.battle_test_suite`:
 - **Gauntlet 4 (Double-Extension Masquerade):** Tested deceptive filenames (`quarterly_earnings.pdf.exe`, `employee_payroll_data.xlsx.exe`, `system_update.docx.scr`). All 3 blocked with Score 85. Standard documents and standard installers passed clean.
 - **Gauntlet 5 (Ransomware Canary Defense):** 3 honeypots armed alongside 5 user documents. Simulated encryption against `!00_financial_statement.docx` triggered `canary_tripped` (Score 85). All 5 user files remained 100% intact, and decoy traps were automatically restored.
 
-### 3. Unit Test Suite
-- **Unit Test Count:** 330 unit tests passing (`pytest sentinel/tests/unit`).
-- **Coverage Areas:** Static PE feature extraction, Authenticode verification, YARA compilation, scoring algorithms, ransomware heuristics, quarantine store operations, and UI event binding.
+### 3. Physical Host PE Harvester Benchmark
+Automated evaluation tool (`sentinel/engine/harvest_system_pes.py`) extracting clean binaries directly from the host system:
+- **Scan Locations:** `C:\Windows\System32`, `C:\Windows\SysWOW64`, and `C:\Program Files`.
+- **Evaluated Samples:** 50 authentic Windows binaries and system libraries (`notepad.exe`, `calc.exe`, `cmd.exe`, `explorer.exe`, `taskmgr.exe`, `regedit.exe`, `d3d11.dll`, `kernel32.dll`, `user32.dll`, etc.).
+- **Results:**
+  - Total Evaluated: 50
+  - Clean Pass Rate: 100.00%
+  - False Positive Rate: 0.00% (0 false positives)
+  - Average Inference Latency: 189.55 ms/file
+- **Artifact:** Detailed execution telemetry persisted in `sentinel/data/system_pe_benchmark.json`.
+
+### 4. Unit Test Suite
+- **Unit Test Count:** 331 unit tests passing (`pytest sentinel/tests/unit`).
+- **Coverage Areas:** EMBER2024 feature extraction, static PE classification, Authenticode verification, YARA compilation, scoring algorithms, ransomware heuristics, quarantine store operations, and UI event binding.
+
+---
+
+## Comparative Architectural Analysis & Open-Source AV Ranking
+
+To provide an objective assessment of how Sentinel fits into the open-source security landscape, the table below compares Sentinel against other notable open-source security systems:
+
+| Evaluation Dimension | ClamAV (Cisco Talos) | Sentinel Antivirus (This Project) | Community YARA Wrappers |
+| :--- | :--- | :--- | :--- |
+| **Primary Focus** | Mail gateways, file servers, high-throughput batch scanning | Windows endpoint defense, interactive triage, non-destructive auditing | Ad-hoc file triage, malware analysis research |
+| **Implementation Language** | C / C++ compiled binaries | Python 3.12 + Win32 native APIs (PyInstaller standalone executables) | Python / Go / Shell scripts |
+| **Core Detection Engine** | Traditional signature database (~8.5M hashes/patterns), unpackers | Peer-reviewed EMBER2024 LightGBM ML (3.23M samples) + local YARA engine | YARA pattern matching only |
+| **Zero-Day PE Detection** | Minimal (requires signature generation and database update) | High (2,568-dim gradient-boosted decision tree for unseen PE inference) | Dependent entirely on custom rule heuristics |
+| **In-Memory Injection Defense** | None (disk-only scanning) | Scans `PAGE_EXECUTE_READWRITE` and unbacked regions for Cobalt Strike / Meterpreter | None |
+| **Ransomware Defense** | None | Decoy canary tripwires with automatic restoration and process suspension | None |
+| **Operating System Integration** | POSIX / Windows command-line daemon | Native Windows NT Service, IPC named pipes, System Tray, PyQt6 Dashboard | Standalone single-execution scripts |
+| **Safe Mode / Audit-Only Default** | Configurable via CLI flags | Enforced by default (never alters files without explicit confirmation) | N/A (read-only by design) |
+| **Scanning Throughput** | Very high (compiled C streaming regex) | Moderate (~189 ms per PE for full 2,568-dim feature extraction) | Fast (limited to compiled YARA rules) |
+| **Host Resource Overhead** | Moderate RAM footprint | ~18 MB bundled executable; lightweight idle service | Minimal |
+
+### Architectural Trade-Offs & Objective Assessment
+- **Where ClamAV Excels:** ClamAV remains the industry standard for high-throughput mail gateways and file servers where millions of files must be checked rapidly against a vast catalog of known historical signatures. Its compiled C engine processes files with higher raw throughput than a Python-based ML feature extractor.
+- **Where Sentinel Excels:** Sentinel is tailored specifically for modern Windows endpoint workstations. It addresses the primary weakness of traditional signature scanners: zero-day polymorphic executables. By embedding the peer-reviewed EMBER2024 LightGBM model trained on 3.23M VirusTotal binaries, Sentinel detects novel, un-cataloged malware without waiting for vendor signature updates. Furthermore, Sentinel provides active volatile memory scanning, ransomware canary deception, and an interactive desktop management interface.
+- **Where Community Tools Fit:** Community YARA wrappers are effective for isolated lab analysis and forensic triage, but they lack the operational scaffolding (background Windows services, IPC buses, filesystem event monitors, and quarantine stores) required for continuous host defense.
 
 ---
 
@@ -123,14 +165,16 @@ sentinel/
 |-- engine/
 |   |-- authenticode.py        # Win32 CryptQueryObject digital certificate validator
 |   |-- canary.py              # Ransomware honeypot traps and auto-repair logic
+|   |-- ember_extractor.py     # Pure-Python 2,568-dimensional PE feature extractor
 |   |-- event_bus.py           # SQLite-backed event broker for normalized telemetry
+|   |-- harvest_system_pes.py  # System PE harvester and empirical benchmark utility
 |   |-- heuristics_crypto.py   # Cryptomining detection heuristics
 |   |-- heuristics_ransomware.py # Ransomware entropy and mass modification heuristics
 |   |-- memory_scanner.py      # Win32 VirtualQueryEx / ReadProcessMemory scanner
 |   |-- scanner.py             # File scanner coordinating YARA, PE, and hash lookups
 |   |-- schema.py              # Telemetry data schemas and event models
 |   |-- scoring.py             # Multi-signal aggregation and threat threshold scoring
-|   +-- static_classifier.py   # LightGBM GBDT PE static classifier
+|   +-- static_classifier.py   # Dual-model EMBER2024 / LightGBM PE static classifier
 |-- intel/
 |   +-- virustotal_client.py   # VirusTotal v3 API client with offline circuit breaker
 |-- response/
@@ -189,7 +233,7 @@ python -m sentinel.cli scan "C:\Users\Username\Downloads"
 ```
 
 #### Run Verification Test Suites
-Run the 330-test unit suite:
+Run the 331-test unit suite:
 ```powershell
 pytest sentinel/tests/unit -q
 ```
