@@ -43,9 +43,14 @@ hidden_imports = [
     "watchdog",
     "watchdog.observers",
     "watchdog.observers.winapi",
+    "signify",
+    "signify.authenticode",
+    "signify.authenticode.signed_file",
     "sentinel",
     "sentinel.engine",
     "sentinel.engine.static_classifier",
+    "sentinel.engine.ember_extractor",
+    "sentinel.engine.harvest_system_pes",
     "sentinel.engine.canary",
     "sentinel.engine.authenticode",
     "sentinel.engine.scoring",
@@ -61,8 +66,10 @@ hidden_imports = [
 
 # Bundled data assets
 datas = [
+    ("sentinel/data/pe_model_ember.model", "sentinel/data"),
     ("sentinel/data/pe_model_v2.joblib", "sentinel/data"),
     ("sentinel/data/large_scale_model_metrics.json", "sentinel/data"),
+    ("sentinel/data/system_pe_benchmark.json", "sentinel/data"),
     ("sentinel/config/rules/*.yar", "sentinel/config/rules"),
 ]
 

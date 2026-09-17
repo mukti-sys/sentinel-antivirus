@@ -25,15 +25,16 @@ DIST_DIR = PROJECT_ROOT / "dist"
 BUILD_DIR = PROJECT_ROOT / "build"
 SENTINEL_DIST = DIST_DIR / "Sentinel"
 SPEC_FILE = PROJECT_ROOT / "sentinel.spec"
-MODEL_FILE = PROJECT_ROOT / "sentinel" / "data" / "pe_model_v2.joblib"
+MODEL_FILE = PROJECT_ROOT / "sentinel" / "data" / "pe_model_ember.model"
+LEGACY_MODEL = PROJECT_ROOT / "sentinel" / "data" / "pe_model_v2.joblib"
 
 
 def check_prerequisites() -> bool:
     """Ensure all required model and configuration files exist prior to compilation."""
     print("[*] Checking build prerequisites...")
-    if not MODEL_FILE.exists():
-        print(f"[-] Missing 5M PE model file: {MODEL_FILE}")
-        print("    Run 'python sentinel/engine/train_large_scale.py' first.")
+    active_model = MODEL_FILE if MODEL_FILE.exists() else LEGACY_MODEL
+    if not active_model.exists():
+        print(f"[-] Missing PE model file: {MODEL_FILE}")
         return False
 
     rules_dir = PROJECT_ROOT / "sentinel" / "config" / "rules"
@@ -42,7 +43,7 @@ def check_prerequisites() -> bool:
         print(f"[-] No YARA rule files found in {rules_dir}")
         return False
 
-    print(f"    [+] Pre-trained model: {MODEL_FILE.name} ({MODEL_FILE.stat().st_size / (1024*1024):.2f} MB)")
+    print(f"    [+] Pre-trained model: {active_model.name} ({active_model.stat().st_size / (1024*1024):.2f} MB)")
     print(f"    [+] YARA rules: {len(yar_files)} rule files verified")
     return True
 
@@ -172,14 +173,20 @@ def audit_distribution() -> None:
             print(f"  [MISSING] {exe_name:20} - {desc}")
 
     # Check model bundle
-    bundled_model = SENTINEL_DIST / "_internal" / "sentinel" / "data" / "pe_model_v2.joblib"
-    if not bundled_model.exists():
-        bundled_model = SENTINEL_DIST / "sentinel" / "data" / "pe_model_v2.joblib"
+    bundled_ember = SENTINEL_DIST / "_internal" / "sentinel" / "data" / "pe_model_ember.model"
+    if not bundled_ember.exists():
+        bundled_ember = SENTINEL_DIST / "sentinel" / "data" / "pe_model_ember.model"
 
-    if bundled_model.exists():
-        print(f"  [OK] Bundled PE Model v2      ({bundled_model.stat().st_size / (1024*1024):5.2f} MB) - 5,000,000 Trained Samples")
+    if bundled_ember.exists():
+        print(f"  [OK] Bundled EMBER2024 Model  ({bundled_ember.stat().st_size / (1024*1024):5.2f} MB) - 3.23M Real Samples (KDD 2025)")
     else:
-        print("  [?] Bundled PE Model v2 embedded in archive")
+        bundled_model = SENTINEL_DIST / "_internal" / "sentinel" / "data" / "pe_model_v2.joblib"
+        if not bundled_model.exists():
+            bundled_model = SENTINEL_DIST / "sentinel" / "data" / "pe_model_v2.joblib"
+        if bundled_model.exists():
+            print(f"  [OK] Bundled PE Model v2      ({bundled_model.stat().st_size / (1024*1024):5.2f} MB) - Baseline Fallback Model")
+        else:
+            print("  [?] Bundled PE Model embedded in archive")
 
     print("-" * 75)
     print(f"  Target Installation Path: C:\\Program Files\\Sentinel Antivirus")

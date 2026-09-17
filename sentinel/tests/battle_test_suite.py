@@ -96,10 +96,11 @@ def gauntlet_1_real_world_false_positives(pe_model: PEFeatureModel) -> dict:
             signed_count += 1
 
         # 2. Extract PE features & run LightGBM inference
-        features = extract_pe_features(path)
+        raw_bytes = path.read_bytes()
+        features = extract_pe_features(path, data=raw_bytes)
         if features is None:
             continue
-        prob = pe_model.predict_malware_probability(features)
+        prob = pe_model.predict_malware_probability(features, data=raw_bytes)
         t_ms = (time.perf_counter() - t0) * 1000.0
         total_latency_ms += t_ms
 

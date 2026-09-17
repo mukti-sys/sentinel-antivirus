@@ -13,10 +13,11 @@ dist/
 
 # Local runtime data — NEVER commit. data/quarantine/ may hold quarantined
 # (possibly malicious) files; data/ holds the local events DB and logs.
-data/
+/data/
 sentinel/data/*
 !sentinel/data/*.joblib
 !sentinel/data/*.json
+!sentinel/data/*.model
 
 # Local settings overrides (keep the sample settings.yaml tracked)
 config/settings.local.yaml

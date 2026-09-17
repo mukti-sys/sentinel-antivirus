@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.joblib binary
+*.model binary
+*.db binary
+*.exe binary
+*.dll binary
+*.zip binary

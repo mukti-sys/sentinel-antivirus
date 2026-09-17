@@ -306,6 +306,20 @@ class OnDemandScanner:
                             description=f"Unsigned PE section with extreme entropy ({features.max_section_entropy:.2f} bits/byte)",
                         )
 
+                    # Deep Machine Learning (EMBER2024 LightGBM Model)
+                    if not threat and not is_system_binary and hasattr(self.classifier, "pe_model"):
+                        ml_prob = self.classifier.pe_model.predict_malware_probability(features, data=file_data)
+                        if ml_prob >= 0.85:
+                            threat = ThreatDetection(
+                                file_path=file_path,
+                                sha256=sha256,
+                                threat_name="ML:PE.MalwareInference",
+                                score=min(95.0, 70.0 + (ml_prob * 25.0)),
+                                severity=ThreatSeverity.HIGH,
+                                engine="ember2024_ml",
+                                description=f"EMBER2024 ML model classified as malware ({ml_prob*100:.1f}% confidence)",
+                            )
+
         # Optional auto-quarantine (strictly inhibited when read_only_mode is active or for memory threats)
         if threat and not threat.is_memory and not self.read_only_mode and self.auto_quarantine and self.quarantine_store:
             try:

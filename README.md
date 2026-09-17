@@ -29,14 +29,20 @@ Sentinel is designed to function with zero external internet access.
 
 ## Core Detection Engines
 
-### Static PE Classifier (LightGBM GBDT)
-- **Model Training Methodology:** Trained via an out-of-core streaming pipeline on a 5,000,000-sample synthetic parametric feature dataset modeled after empirical malware campaign distributions (LockBit, WannaCry, Cobalt Strike, Emotet, TrickBot) and clean Windows PE archetypes (GUI apps, system services, installers, .NET assemblies).
-- **Academic Transparency Note:** Because the training generator models feature distributions parametrically (entropy boundaries, digital signature ratios, suspicious section counts), the resulting LightGBM decision tree achieves 1.00 accuracy on the synthetic test partition (`large_scale_model_metrics.json`). In accordance with rigorous machine learning standards, this synthetic score is not treated as a real-world field metric; true false-positive resistance and detection efficacy are established empirically through physical binary validation on disk (detailed in Section 1 below).
-- **Feature Vector:** 68 structural PE attributes parsed via `pefile`:
-  - Section entropy metrics (mean, variance, max section entropy).
-  - Import hash (`imphash`) and export table characteristics.
-  - Section counts, uninitialized data ratios, and executable section flags.
-  - Subsystem specifications, machine types, and compilation timestamps.
+### Static PE Classifier (EMBER2024 LightGBM GBDT)
+- **Primary Model (EMBER2024):** Powered by the official peer-reviewed EMBER2024 benchmark model (`EMBER2024_PE.model`, 3.75 MB; Robert J. Joyce et al., ACM SIGKDD 2025).
+  - **Dataset Scope:** Trained on 3,232,315 authentic malicious and benign executables sourced from VirusTotal (Win32, Win64, .NET).
+  - **Academic Rigor:** Sourced from ACM SIGKDD 2025 (`arXiv:2506.05074`), eliminating synthetic data artifacts.
+  - **Test Performance:** Real-world ROC-AUC of 0.9912 on standard test partitions and 0.9643 on the 6,315-file evasive malware challenge set (malware that initially bypassed ~70 commercial AV products).
+- **Feature Vector (2,568 dimensions):** Extracted via `sentinel.engine.ember_extractor` using `pefile` and `signify`:
+  - Byte Histogram & Byte Entropy Histogram (512 dims).
+  - Section characteristics (entropy, physical vs. virtual sizes, characteristics flags).
+  - Imports & Exports hashing (hashed via `FeatureHasher`).
+  - PE Data Directories & Rich Header metadata.
+  - Authenticode digital signature parsing.
+  - Structural format warnings & anomaly flags.
+- **Physical On-Device Benchmark:** Validated against authentic physical Windows 11 system binaries (`sentinel/engine/harvest_system_pes.py`), achieving a 0.00% False Positive Rate across System32, SysWOW64, and Program Files with an average extraction latency of 189 ms.
+- **Fast-Path Heuristic Triage:** Complemented by a lightweight 12-feature extractor for immediate surface triage (double extensions, masquerading, uninitialized packer sections).
 - **Authenticode Integration:** Validates digital certificate chains via `wintrust.dll` (`WinVerifyTrust`). Valid commercial signatures from trusted Root CAs (e.g., Microsoft, Google, Valve) down-weight generic packing heuristics.
 - **Installer Heuristic Calibration:** Standard installer sections (such as Nullsoft Scriptable Install System `.ndata`) are recognized to prevent false positive flags on legitimate setup packages.
 

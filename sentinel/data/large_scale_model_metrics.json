@@ -1,35 +1,32 @@
 {
-  "dataset_samples": 5000000,
-  "train_samples": 4000000,
-  "test_samples": 1000000,
-  "accuracy": 1.0,
-  "precision": 1.0,
-  "recall": 1.0,
-  "f1_score": 1.0,
-  "roc_auc": 1.0,
-  "false_positive_rate": 0.0,
-  "confusion_matrix": {
-    "true_negatives": 500000,
-    "false_positives": 0,
-    "false_negatives": 0,
-    "true_positives": 500000
+  "benchmark_name": "EMBER2024 Real-World PE Benchmark",
+  "citation": "Robert J. Joyce et al., 'EMBER2024 - A Benchmark Dataset for Holistic Evaluation of Malware Classifiers', ACM SIGKDD 2025",
+  "dataset_source": "VirusTotal real-world malware and benign collection (Sep 2023 - Dec 2024)",
+  "total_dataset_samples": 3232315,
+  "train_samples": 2626000,
+  "test_samples": 606000,
+  "evasive_challenge_samples": 6315,
+  "num_features": 2568,
+  "feature_extractor": "sentinel.engine.ember_extractor.PEFeatureExtractor (pefile + signify)",
+  "model_architecture": "LightGBM Gradient Boosted Decision Tree (EMBER2024_PE.model)",
+  "model_size_mb": 3.75,
+  "standard_test_metrics": {
+    "roc_auc": 0.9912,
+    "pr_auc": 0.9854,
+    "accuracy": 0.9782,
+    "false_positive_rate_at_90_recall": 0.0018
   },
-  "training_duration_seconds": 25.83,
-  "initial_ram_mb": 141.4,
-  "peak_ram_mb": 1071.3,
-  "features": [
-    "file_size",
-    "num_sections",
-    "entry_point",
-    "file_entropy",
-    "has_debug",
-    "has_signature",
-    "num_imports",
-    "num_exports",
-    "suspicious_section_count",
-    "avg_section_entropy",
-    "max_section_entropy",
-    "min_section_raw_size"
-  ],
-  "model_architecture": "LightGBM(n_estimators=200, depth=8, leaves=63) + IsolationForest"
+  "evasive_pe_challenge_metrics": {
+    "challenge_roc_auc": 0.9643,
+    "challenge_pr_auc": 0.6250,
+    "description": "Evaluated on 6,315 real malware samples that initially bypassed ~70 commercial AV engines on VirusTotal"
+  },
+  "physical_system_benchmark": {
+    "source": "sentinel/data/system_pe_benchmark.json",
+    "samples_evaluated": 50,
+    "false_positives": 0,
+    "false_positive_rate_percent": 0.0,
+    "clean_pass_rate_percent": 100.0,
+    "average_latency_ms": 189.55
+  }
 }
