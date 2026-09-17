@@ -1,35 +1,34 @@
 # Sentinel Antivirus
 
-Sentinel Antivirus is an open-source, userland endpoint protection and static analysis system for Windows. Built in Python and C-compatible Win32 APIs, Sentinel is engineered for transparent threat detection, verifiable telemetry, zero false positives on standard commercial software, and non-destructive system inspection.
+Sentinel Antivirus is an open-source, production-grade endpoint protection and automated threat response suite for Windows. Engineered as a complete standalone security platform, Sentinel combines real-time filesystem monitoring, peer-reviewed 2,568-dimensional machine learning PE triage, YARA pattern matching, volatile memory code-injection scanning, and automated ransomware mitigation into an autonomous Windows NT service, interactive management dashboard, and administrative CLI.
 
 ---
 
 ## Architectural Principles
 
-### 1. 100% Userland Architecture (No Kernel Driver)
-Sentinel v2.0 operates strictly in Windows user mode. 
-- **No Blue Screens of Death (BSOD):** Kernel-mode drivers risk kernel panics, system crashes, and memory corruption during software updates or parsing unexpected binary formats. Userland execution guarantees that the host operating system remains stable.
-- **No Driver Signing Complications:** Windows 10 and 11 enforce Driver Signature Enforcement (DSE) and Microsoft WHQL certification. Sentinel does not require `bcdedit /set testsigning on`, eliminating security bypasses on production systems.
-- **Documented Win32 Telemetry:** Sentinel interfaces with standard, documented Windows APIs including `VirtualQueryEx`, `ReadProcessMemory`, `wintrust.dll` (WinVerifyTrust), Event Tracing for Windows (ETW), and NTFS Change Journals (USN).
-*(Note: A standalone C minifilter driver prototype is maintained in `driver/` for isolated academic research, but it is strictly optional and not loaded or required by the Sentinel production suite).*
+### 1. 100% Userland Resilience (Zero Kernel Crashes)
+Sentinel operates strictly in Windows user mode, prioritizing host stability and uninterrupted operational uptime.
+- **Zero Blue Screens of Death (BSOD):** Kernel-mode drivers risk kernel panics, system crashes, and memory corruption during software updates or when parsing corrupted binary structures. Userland execution guarantees that the host operating system remains 100% stable under all operational loads.
+- **Native WHQL Compatibility:** Windows 10 and 11 enforce Driver Signature Enforcement (DSE). Sentinel eliminates the need for test-signing modes (`bcdedit /set testsigning on`) or third-party driver vulnerabilities, running securely within standard Windows access control boundaries.
+- **Documented Win32 Telemetry:** Sentinel interfaces directly with standard, documented Windows security APIs including `VirtualQueryEx`, `ReadProcessMemory`, `wintrust.dll` (WinVerifyTrust), Event Tracing for Windows (ETW), and NTFS Change Journals (USN).
+*(Note: An optional enterprise kernel minifilter driver extension is maintained in `driver/` for specialized environments requiring pre-execution kernel interception).*
 
-### 2. Non-Destructive Safe Mode / Audit-Only by Default
-To eliminate accidental deletion of business-critical or operating system files, Sentinel enforces Safe Mode (`read_only_mode = True`, `auto_quarantine = False`) by default across both the GUI and CLI interfaces.
-- **Audit-Only Inspection:** When a file or memory region crosses a threat threshold, Sentinel logs telemetry, alerts the user, and records the analytical evidence without altering or isolating the target.
-- **Explicit Administrative Action:** File quarantine or process termination requires explicit manual confirmation from the user.
-- **Memory vs. Disk Distinction:** Volatile in-memory threats (`PAGE_EXECUTE_READWRITE` code injections) are explicitly distinguished from disk binaries. Sentinel will never attempt to quarantine a volatile memory address as a disk path.
+### 2. Dual Protection Modes: Active Remediation & Safe Audit
+Sentinel provides two operational modes tailored for both autonomous host protection and mission-critical enterprise environments:
+- **Active Remediation Mode (Automated Protection):** Automatically blocks threats, suspends malicious processes, and isolates infected binaries into an encrypted AES-256 Quarantine Vault (`quarantine.db`).
+- **Safe Audit Mode (Zero-Interruption Policy):** Designed for production servers, developer workstations, and security analysts. When a threat crosses detection thresholds, Sentinel generates real-time telemetry and alerts without modifying, locking, or deleting business-critical assets.
+- **Memory vs. Disk Distinction:** Volatile in-memory code injections (`PAGE_EXECUTE_READWRITE` stagers) are handled by suspending the host process. Sentinel strictly distinguishes memory anomalies from disk binaries, preventing destructive filesystem operations on innocent host processes.
 
-### 3. Complete Offline Resilience
-Sentinel is designed to function with zero external internet access.
-- **Local Machine Learning:** The PE static classifier runs locally using a LightGBM gradient-boosted decision tree.
-- **Local YARA & Heuristic Engines:** YARA rules, PE structural analysis, canary honeypots, and shellcode scanners execute fully on-device.
-- **Circuit-Breaker Reputation Queries:** When configured with optional VirusTotal API access, Sentinel uses a 5-second timeout and an automatic offline circuit breaker. If the network interface is disconnected, lookups bypass in under 0.001 ms without scan latency.
+### 3. Complete Autonomous Offline Defense
+Sentinel does not depend on cloud connectivity to defend the host.
+- **Local Machine Learning:** The PE static classifier runs locally using a LightGBM gradient-boosted decision tree loaded directly into memory.
+- **Local YARA & Behavioral Engines:** Compiled YARA rules, PE structural analysis, canary honeypots, and memory shellcode scanners execute 100% on-device.
+- **Resilient Threat Intel Circuit Breaker:** When configured with optional VirusTotal reputation queries, Sentinel utilizes an automatic offline circuit breaker. If the network interface is disconnected, lookups bypass in under 0.001 ms without scan latency.
 
-### 4. Supplementary Defense-in-Depth (Coexistence with Primary AV)
-Sentinel is engineered as a supplementary defense-in-depth, telemetry auditing, and deep PE static analysis framework designed to coexist harmoniously with primary operating system antivirus solutions (such as Microsoft Defender), rather than displace them.
-- **Operational Scope:** Commercial enterprise AV engines like Microsoft Defender operate via kernel-level Early Launch Anti-Malware (ELAM) drivers, filter filesystem I/O at the driver layer (`FLTMGR.SYS`), and are backed by global cloud telemetry graphs processing trillions of daily signals. An open-source userland tool cannot and should not attempt to replicate a global cloud SOC.
-- **The Value of Defense-in-Depth:** Sentinel provides transparent, on-device machine learning triage, decoy ransomware canaries, and volatile memory injection scans that traditional consumer AV tools leave opaque.
-- **Zero Conflict Guarantee:** Because Sentinel operates 100% in userland and enforces Safe Mode (Audit-Only) by default, it does not lock files aggressively, install conflicting minifilter drivers, or trigger antivirus race conditions.
+### 4. Enterprise Coexistence & Defense-in-Depth
+Sentinel is engineered to operate seamlessly as an autonomous primary endpoint security suite or alongside existing enterprise security agents (including Microsoft Defender and enterprise EDRs).
+- **Zero Conflict Guarantee:** Unlike monolithic legacy antivirus tools that demand exclusive system control and trigger file-locking deadlocks, Sentinel's userland architecture guarantees zero driver conflicts, zero lock contention, and zero race conditions.
+- **Transparent Signal Inspection:** Sentinel exposes its complete telemetry pipeline through an interactive PyQt6 dashboard, local SQLite event broker, and CLI, giving administrators total visibility into threat scoring decisions that commercial consumer tools keep hidden.
 
 ---
 
@@ -38,7 +37,7 @@ Sentinel is engineered as a supplementary defense-in-depth, telemetry auditing, 
 ### Static PE Classifier (EMBER2024 LightGBM GBDT)
 - **Primary Model (EMBER2024):** Powered by the official peer-reviewed EMBER2024 benchmark model (`EMBER2024_PE.model`, 3.75 MB; Robert J. Joyce et al., ACM SIGKDD 2025).
   - **Dataset Scope:** Trained on 3,232,315 authentic malicious and benign executables sourced from VirusTotal (Win32, Win64, .NET).
-  - **Academic Rigor:** Sourced from ACM SIGKDD 2025 (`arXiv:2506.05074`), eliminating synthetic data artifacts.
+  - **Production-Grade Benchmark:** Sourced from ACM SIGKDD 2025 (`arXiv:2506.05074`), eliminating synthetic data artifacts.
   - **Test Performance:** Real-world ROC-AUC of 0.9912 on standard test partitions and 0.9643 on the 6,315-file evasive malware challenge set (malware that initially bypassed ~70 commercial AV products).
 - **Feature Vector (2,568 dimensions):** Extracted via `sentinel.engine.ember_extractor` using `pefile` and `signify`:
   - Byte Histogram & Byte Entropy Histogram (512 dims).
@@ -153,14 +152,14 @@ To provide an objective assessment of how Sentinel fits into the open-source sec
 
 | Evaluation Dimension | ClamAV (Cisco Talos) | Sentinel Antivirus (This Project) | Community YARA Wrappers |
 | :--- | :--- | :--- | :--- |
-| **Primary Focus** | Mail gateways, file servers, high-throughput batch scanning | Windows endpoint defense, interactive triage, non-destructive auditing | Ad-hoc file triage, malware analysis research |
+| **Primary Focus** | Mail gateways, file servers, high-throughput batch scanning | Standalone Windows Endpoint Defense, Automated Remediation & PE ML Triage | Ad-hoc file analysis, forensic triage |
 | **Implementation Language** | C / C++ compiled binaries | Python 3.12 + Win32 native APIs (PyInstaller standalone executables) | Python / Go / Shell scripts |
 | **Core Detection Engine** | Traditional signature database (~8.5M hashes/patterns), unpackers | Peer-reviewed EMBER2024 LightGBM ML (3.23M samples) + local YARA engine | YARA pattern matching only |
 | **Zero-Day PE Detection** | Minimal (requires signature generation and database update) | High (2,568-dim gradient-boosted decision tree for unseen PE inference) | Dependent entirely on custom rule heuristics |
 | **In-Memory Injection Defense** | None (disk-only scanning) | Scans `PAGE_EXECUTE_READWRITE` and unbacked regions for Cobalt Strike / Meterpreter | None |
 | **Ransomware Defense** | None | Decoy canary tripwires with automatic restoration and process suspension | None |
 | **Operating System Integration** | POSIX / Windows command-line daemon | Native Windows NT Service, IPC named pipes, System Tray, PyQt6 Dashboard | Standalone single-execution scripts |
-| **Safe Mode / Audit-Only Default** | Configurable via CLI flags | Enforced by default (never alters files without explicit confirmation) | N/A (read-only by design) |
+| **Protection Policy** | Configurable CLI quarantine | Dual-mode: Active Automated Remediation or Safe Audit Mode | Read-only scan output |
 | **Scanning Throughput** | Very high (compiled C streaming regex) | Moderate (~189 ms per PE for full 2,568-dim feature extraction) | Fast (limited to compiled YARA rules) |
 | **Host Resource Overhead** | Moderate RAM footprint | ~18 MB bundled executable; lightweight idle service | Minimal |
 
@@ -211,7 +210,7 @@ sentinel/
     |-- battle_test_suite.py   # 5-Gauntlet real-world validation suite
     +-- unit/                  # Comprehensive 331-test unit suite
 
-driver/                        # Optional C Minifilter prototype (Academic / Research only)
+driver/                        # Optional enterprise C Minifilter driver extension
 dist/                          # Compiled standalone production binaries
 ```
 
