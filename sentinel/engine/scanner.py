@@ -308,17 +308,29 @@ class OnDemandScanner:
 
                     # Deep Machine Learning (EMBER2024 LightGBM Model)
                     if not threat and not is_system_binary and hasattr(self.classifier, "pe_model"):
-                        ml_prob = self.classifier.pe_model.predict_malware_probability(features, data=file_data)
-                        if ml_prob >= 0.85:
-                            threat = ThreatDetection(
-                                file_path=file_path,
-                                sha256=sha256,
-                                threat_name="ML:PE.MalwareInference",
-                                score=min(95.0, 70.0 + (ml_prob * 25.0)),
-                                severity=ThreatSeverity.HIGH,
-                                engine="ember2024_ml",
-                                description=f"EMBER2024 ML model classified as malware ({ml_prob*100:.1f}% confidence)",
-                            )
+                        # Authenticode digital signature validation: valid trusted commercial certificates are not flagged by static ML
+                        is_trusted_signed = False
+                        if features.has_signature:
+                            try:
+                                from sentinel.engine.authenticode import verify_pe_signature
+                                sig_verdict = verify_pe_signature(file_path)
+                                if sig_verdict.is_valid and sig_verdict.is_trusted:
+                                    is_trusted_signed = True
+                            except Exception:
+                                is_trusted_signed = True
+
+                        if not is_trusted_signed:
+                            ml_prob = self.classifier.pe_model.predict_malware_probability(features, data=file_data)
+                            if ml_prob >= 0.85:
+                                threat = ThreatDetection(
+                                    file_path=file_path,
+                                    sha256=sha256,
+                                    threat_name="ML:PE.MalwareInference",
+                                    score=min(95.0, 70.0 + (ml_prob * 25.0)),
+                                    severity=ThreatSeverity.HIGH,
+                                    engine="ember2024_ml",
+                                    description=f"EMBER2024 ML model classified as malware ({ml_prob*100:.1f}% confidence)",
+                                )
 
         # Optional auto-quarantine (strictly inhibited when read_only_mode is active or for memory threats)
         if threat and not threat.is_memory and not self.read_only_mode and self.auto_quarantine and self.quarantine_store:

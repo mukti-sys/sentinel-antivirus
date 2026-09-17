@@ -52,7 +52,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    """Scan a target path using PE ML v2, YARA rules, and Authenticode."""
+    """Scan a target path using OnDemandScanner (YARA, Authenticode, PE Heuristics, EMBER2024)."""
     target = Path(args.path).resolve()
     if not target.exists():
         print(f"[-] Path not found: {target}")
@@ -69,25 +69,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"  SENTINEL SCAN REPORT: {len(pe_files)} Executable(s) in {target.name}")
     print("=" * 70)
 
-    model = PEFeatureModel()
+    from sentinel.engine.scanner import OnDemandScanner
+    scanner = OnDemandScanner(read_only_mode=True)
     threats_found = 0
 
     for f in pe_files:
-        feats = extract_pe_features(f)
-        if not feats:
-            continue
-
-        threat = model.predict_threat(feats)
-        prob = threat["malware_probability"]
-        is_malware = threat["is_malware"]
-        level = "MALICIOUS" if prob >= 0.8 else ("SUSPICIOUS" if prob >= 0.5 or is_malware else "CLEAN")
-
-        status_tag = "[CLEAN]     " if level == "CLEAN" else f"[{level}]"
-        if is_malware:
+        threat = scanner.scan_file(f)
+        if threat is not None:
             threats_found += 1
-            print(f"  {status_tag:12} {f.name[:32]:32} | Prob: {prob * 100:5.1f}% | Size: {f.stat().st_size:,}B")
+            status_tag = f"[{threat.severity.value.upper()}]"
+            print(f"  {status_tag:12} {f.name[:32]:32} | {threat.threat_name} (Score: {threat.score:.0f}) | Size: {f.stat().st_size:,}B")
         elif args.verbose:
-            print(f"  {status_tag:12} {f.name[:32]:32} | Prob: {prob * 100:5.1f}%")
+            print(f"  [CLEAN]      {f.name[:32]:32} | OK")
 
     print("-" * 70)
     if threats_found == 0:

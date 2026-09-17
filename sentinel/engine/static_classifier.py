@@ -242,6 +242,8 @@ def _get_resource_dir(subdir: str) -> Path:
             candidates.append(Path(sys._MEIPASS) / "sentinel" / subdir)
             candidates.append(Path(sys._MEIPASS) / subdir)
         exe_dir = Path(sys.executable).parent
+        candidates.append(exe_dir / "_internal" / "sentinel" / subdir)
+        candidates.append(exe_dir / "_internal" / subdir)
         candidates.append(exe_dir / "sentinel" / subdir)
         candidates.append(exe_dir / subdir)
     candidates.append(Path(__file__).resolve().parent.parent / subdir)
@@ -424,7 +426,11 @@ class PEFeatureModel:
         vec = np.array([features.to_vector()], dtype=np.float32)
         if self._lgbm_model is not None:
             try:
-                return float(self._lgbm_model.predict_proba(vec)[0, 1])
+                prob = float(self._lgbm_model.predict_proba(vec)[0, 1])
+                # Commercial signed binaries must not be condemned by synthetic fallback models
+                if features.has_signature and features.suspicious_section_count == 0:
+                    return min(prob, 0.15)
+                return prob
             except Exception:
                 pass
         return 0.85 if self.is_suspicious(features, data=data) else 0.05
@@ -446,6 +452,9 @@ class PEFeatureModel:
     def is_suspicious(self, features: PEFeatures, data: bytes | None = None) -> bool:
         """True if the PE features look anomalous or match known malware profiles."""
         self._ensure_fitted()
+        # Authenticode signed binaries without known packer anomalies are not suspicious
+        if features.has_signature and features.suspicious_section_count == 0:
+            return False
         if self._ember_booster is not None and data is not None and len(data) >= 128:
             try:
                 prob = self.predict_malware_probability(features, data=data)

@@ -24,6 +24,8 @@ hidden_imports = [
     "sklearn.ensemble",
     "sklearn.ensemble._isolation_forest",
     "sklearn.tree",
+    "sklearn.feature_extraction",
+    "sklearn.feature_extraction._hashing_fast",
     "yara",
     "pefile",
     "win32timezone",
