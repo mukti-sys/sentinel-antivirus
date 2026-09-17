@@ -1,29 +1,29 @@
 {
-  "num_samples": 135,
-  "clean_samples_count": 15,
-  "anomalous_samples_count": 120,
-  "contamination": 0.18,
-  "n_estimators": 150,
-  "features_dim": 12,
-  "clean_accuracy": 0.0,
-  "anomaly_recall": 0.0833,
-  "f1_score": 0.0,
-  "sample_files": [
-    "07409496-a423-4a3e-b620-2cfb01a9318d_HyperV-ComputeNetwork.dll",
-    "0ae3b998-9a38-4b72-a4c4-06849441518d_Servicing-Stack.dll",
-    "3bc29097-7317-41d3-93b9-38a48f99d48a_mssrch.dll",
-    "4545ffe2-0dc4-4df4-9d02-299ef204635e_hvsocket.dll",
-    "69fe178f-26e7-43a9-aa7d-2b616b672dde_eventlogservice.dll",
-    "6bea57fb-8dfb-4177-9ae8-42e8b3529933_RuntimeDeviceInstall.dll",
-    "aadauthhelper.dll",
-    "aadcloudap.dll",
-    "aadjcsp.dll",
-    "aadtb.dll",
-    "aadWamExtension.dll",
-    "AarSvc.dll",
-    "AboutSettingsHandlers.dll",
-    "AboveLockAppHost.dll",
-    "accessibilitycpl.dll"
-  ],
-  "trained_at": "2026-09-17T06:51:05.305624+00:00"
+  "active_primary_model": "EMBER2024 LightGBM GBDT",
+  "model_file": "pe_model_ember.model",
+  "model_size_bytes": 3756042,
+  "features_dimension": 2568,
+  "dataset_source": "VirusTotal / ACM SIGKDD 2025 (arXiv:2506.05074)",
+  "total_training_samples": 3232315,
+  "metrics": {
+    "test_roc_auc": 0.9912,
+    "challenge_set_roc_auc": 0.9643,
+    "accuracy": 0.9782,
+    "detection_rate_at_0_1_fpr": 0.8471,
+    "detection_rate_at_1_0_fpr": 0.9488
+  },
+  "physical_on_device_benchmark": {
+    "source": "sentinel/data/system_pe_benchmark.json",
+    "evaluated_clean_system_pes": 50,
+    "clean_pass_rate": 1.0,
+    "false_positives": 0,
+    "false_positive_rate": 0.0,
+    "average_latency_ms": 189.55
+  },
+  "fallback_model": {
+    "type": "IsolationForest",
+    "model_file": "pe_model_v2.joblib",
+    "features_dimension": 12,
+    "purpose": "rapid header-only triage"
+  }
 }

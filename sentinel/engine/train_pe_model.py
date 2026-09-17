@@ -302,9 +302,10 @@ def train_and_save_model(
     joblib.dump(all_vectors, DATASET_PATH)
 
     # Write metrics JSON artifact
-    with open(METRICS_PATH, "w", encoding="utf-8") as f:
+    metrics_path = output_path.with_suffix(".json") if output_path != MODEL_PATH else METRICS_PATH
+    with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
-    logger.info("Saved model metrics to %s", METRICS_PATH)
+    logger.info("Saved model metrics to %s", metrics_path)
 
     return metadata
 
