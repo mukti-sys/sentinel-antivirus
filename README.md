@@ -30,7 +30,8 @@ Sentinel is designed to function with zero external internet access.
 ## Core Detection Engines
 
 ### Static PE Classifier (LightGBM GBDT)
-- **Dataset:** Trained on the BODS (5,000,000 sample) dataset.
+- **Model Training Methodology:** Trained via an out-of-core streaming pipeline on a 5,000,000-sample synthetic parametric feature dataset modeled after empirical malware campaign distributions (LockBit, WannaCry, Cobalt Strike, Emotet, TrickBot) and clean Windows PE archetypes (GUI apps, system services, installers, .NET assemblies).
+- **Academic Transparency Note:** Because the training generator models feature distributions parametrically (entropy boundaries, digital signature ratios, suspicious section counts), the resulting LightGBM decision tree achieves 1.00 accuracy on the synthetic test partition (`large_scale_model_metrics.json`). In accordance with rigorous machine learning standards, this synthetic score is not treated as a real-world field metric; true false-positive resistance and detection efficacy are established empirically through physical binary validation on disk (detailed in Section 1 below).
 - **Feature Vector:** 68 structural PE attributes parsed via `pefile`:
   - Section entropy metrics (mean, variance, max section entropy).
   - Import hash (`imphash`) and export table characteristics.
