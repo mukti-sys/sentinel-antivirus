@@ -55,6 +55,14 @@ SYSTEM_IGNORE_FILES = frozenset({
     "dumpstack.log.tmp",
 })
 
+# Sentinel self-protection binary set
+SENTINEL_SELF_BINARIES = frozenset({
+    "sentinel_service.exe",
+    "sentinel_gui.exe",
+    "sentinel_tray.exe",
+    "sentinel_cli.exe",
+})
+
 
 class ScanType(enum.Enum):
     QUICK = "quick"
@@ -271,8 +279,10 @@ class OnDemandScanner:
                         description=f"Executable PE binary disguised with non-executable extension: '{file_path.suffix.lower()}'",
                     )
                 else:
-                    # Identify protected Windows system binaries (which are catalog-signed via CatRoot)
+                    # Identify protected Windows system binaries (catalog-signed via CatRoot)
+                    # and Sentinel self binaries (which are unsigned PyInstaller packages)
                     is_system_binary = False
+                    is_self_binary = file_path.name.lower() in SENTINEL_SELF_BINARIES
                     try:
                         res_path = file_path.resolve()
                         win_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
@@ -285,7 +295,7 @@ class OnDemandScanner:
                         pass
 
                     # Genuine structural anomalies: unsigned binaries with known packer sections or extreme entropy
-                    if features.suspicious_section_count > 0 and not features.has_signature and not is_system_binary:
+                    if features.suspicious_section_count > 0 and not features.has_signature and not is_system_binary and not is_self_binary:
                         threat = ThreatDetection(
                             file_path=file_path,
                             sha256=sha256,
@@ -295,7 +305,7 @@ class OnDemandScanner:
                             engine="pe_classifier",
                             description=f"Unsigned PE binary contains {features.suspicious_section_count} suspicious/packer section(s)",
                         )
-                    elif features.max_section_entropy > 7.85 and not features.has_signature and not is_system_binary:
+                    elif features.max_section_entropy > 7.85 and not features.has_signature and not is_system_binary and not is_self_binary:
                         threat = ThreatDetection(
                             file_path=file_path,
                             sha256=sha256,
@@ -307,7 +317,7 @@ class OnDemandScanner:
                         )
 
                     # Deep Machine Learning (EMBER2024 LightGBM Model)
-                    if not threat and not is_system_binary and hasattr(self.classifier, "pe_model"):
+                    if not threat and not is_system_binary and not is_self_binary and hasattr(self.classifier, "pe_model"):
                         # Authenticode digital signature validation: valid trusted commercial certificates are not flagged by static ML
                         is_trusted_signed = False
                         if features.has_signature:
