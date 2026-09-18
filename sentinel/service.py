@@ -1,4 +1,4 @@
-"""Sentinel Windows service -- runs the core detection loop as a service.
+"""Sentinel cross-platform service -- runs the core detection loop as a service/daemon.
 
 Implements phases.md Phase 3 hardening:
     run core logic as a Windows service
@@ -112,14 +112,14 @@ class SentinelOrchestrator:
             logger.warning("canary deception engine init failed: %s", exc)
             self._canary_manager = None
 
-        # Start Win32 Named Pipe IPC server for desktop session communication
+        # Start platform-appropriate IPC server
         try:
-            from sentinel.ipc import NamedPipeServer
-            self._ipc_server = NamedPipeServer(command_handler=self._handle_ipc_command)
+            from sentinel.platform.ipc import create_ipc_server
+            self._ipc_server = create_ipc_server(command_handler=self._handle_ipc_command)
             self._ipc_server.start()
-            logger.info("named pipe IPC server started")
+            logger.info("IPC server started (platform=%s)", sys.platform)
         except Exception as exc:
-            logger.warning("named pipe IPC server init failed: %s", exc)
+            logger.warning("IPC server init failed: %s", exc)
             self._ipc_server = None
 
         # Start sensors (each in its own thread per architecture.md Section 8).
@@ -127,20 +127,41 @@ class SentinelOrchestrator:
 
 
     def _start_sensors(self) -> None:
-        """Start all sensors, skipping any that fail to initialize."""
-        # FS sensor (no admin required).
+        """Start platform-appropriate sensors, skipping any that fail."""
+        from sentinel.platform import PLATFORM
+
+        # --- Cross-platform: FS sensor (watchdog — works everywhere) ---
         try:
-            from sentinel.sensors.fs_sensor import FsSensor
-            downloads = str(Path.home() / "Downloads")
-            desktop = str(Path.home() / "Desktop")
-            fs = FsSensor(self._bus, [downloads, desktop])
+            if PLATFORM == "darwin":
+                from sentinel.sensors.fsevents_sensor import FSEventsSensor
+                fs = FSEventsSensor(self._bus)
+            elif PLATFORM == "linux":
+                # Try fanotify first, fall back to watchdog
+                try:
+                    from sentinel.sensors.fanotify_sensor import FanotifySensor, _fanotify_available
+                    if _fanotify_available():
+                        from sentinel.platform import get_default_watch_dirs
+                        fs = FanotifySensor(self._bus, watch_paths=["/"])
+                        logger.info("using fanotify sensor (kernel-level)")
+                    else:
+                        raise ImportError("fanotify unavailable")
+                except (ImportError, RuntimeError):
+                    from sentinel.sensors.fs_sensor import FsSensor
+                    from sentinel.platform import get_default_watch_dirs
+                    fs = FsSensor(self._bus, get_default_watch_dirs())
+                    logger.info("using watchdog fs_sensor (fanotify unavailable)")
+            else:
+                from sentinel.sensors.fs_sensor import FsSensor
+                downloads = str(Path.home() / "Downloads")
+                desktop = str(Path.home() / "Desktop")
+                fs = FsSensor(self._bus, [downloads, desktop])
             fs.start()
             self._sensors.append(fs)
-            logger.info("fs_sensor started")
+            logger.info("fs_sensor started (platform=%s)", PLATFORM)
         except Exception as exc:
             logger.warning("fs_sensor failed to start: %s", exc)
 
-        # Network sensor (no admin required).
+        # --- Cross-platform: Network sensor (psutil — works everywhere) ---
         try:
             from sentinel.sensors.network_sensor import NetworkSensor
             net = NetworkSensor(self._bus, baseline_on_start=True)
@@ -150,25 +171,59 @@ class SentinelOrchestrator:
         except Exception as exc:
             logger.warning("network_sensor failed to start: %s", exc)
 
-        # ETW sensor (requires admin).
-        try:
-            from sentinel.sensors.etw_sensor import EtwSensor
-            etw = EtwSensor(self._bus)
-            etw.start()
-            self._sensors.append(etw)
-            logger.info("etw_sensor started")
-        except Exception as exc:
-            logger.warning("etw_sensor failed to start (admin?): %s", exc)
+        # --- Platform-specific: Process/System event sensors ---
+        if PLATFORM == "windows":
+            # ETW sensor (requires admin).
+            try:
+                from sentinel.sensors.etw_sensor import EtwSensor
+                etw = EtwSensor(self._bus)
+                etw.start()
+                self._sensors.append(etw)
+                logger.info("etw_sensor started")
+            except Exception as exc:
+                logger.warning("etw_sensor failed to start (admin?): %s", exc)
 
-        # Eventlog sensor (requires admin).
-        try:
-            from sentinel.sensors.eventlog_sensor import EventLogSensor
-            evtlog = EventLogSensor(self._bus)
-            evtlog.start()
-            self._sensors.append(evtlog)
-            logger.info("eventlog_sensor started")
-        except Exception as exc:
-            logger.warning("eventlog_sensor failed to start (admin?): %s", exc)
+            # Eventlog sensor (requires admin).
+            try:
+                from sentinel.sensors.eventlog_sensor import EventLogSensor
+                evtlog = EventLogSensor(self._bus)
+                evtlog.start()
+                self._sensors.append(evtlog)
+                logger.info("eventlog_sensor started")
+            except Exception as exc:
+                logger.warning("eventlog_sensor failed to start (admin?): %s", exc)
+
+        elif PLATFORM == "linux":
+            # Linux Audit sensor (replacement for ETW).
+            try:
+                from sentinel.sensors.audit_sensor import AuditSensor
+                audit = AuditSensor(self._bus)
+                audit.start()
+                self._sensors.append(audit)
+                logger.info("audit_sensor started")
+            except Exception as exc:
+                logger.warning("audit_sensor failed to start: %s", exc)
+
+            # Journald sensor (replacement for EventLog).
+            try:
+                from sentinel.sensors.journald_sensor import JournaldSensor
+                jrnl = JournaldSensor(self._bus)
+                jrnl.start()
+                self._sensors.append(jrnl)
+                logger.info("journald_sensor started")
+            except Exception as exc:
+                logger.warning("journald_sensor failed to start: %s", exc)
+
+        elif PLATFORM == "darwin":
+            # macOS log stream sensor (replacement for ETW + EventLog).
+            try:
+                from sentinel.sensors.macos_log_sensor import MacOSLogSensor
+                maclog = MacOSLogSensor(self._bus)
+                maclog.start()
+                self._sensors.append(maclog)
+                logger.info("macos_log_sensor started")
+            except Exception as exc:
+                logger.warning("macos_log_sensor failed to start: %s", exc)
 
     def _run_loop(self) -> None:
         """Main event processing loop."""

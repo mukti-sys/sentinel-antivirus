@@ -1,6 +1,26 @@
 # Sentinel Antivirus
 
-Sentinel Antivirus is an open-source, production-grade endpoint protection and automated threat response suite for Windows. Engineered as a complete standalone security platform, Sentinel combines real-time filesystem monitoring, peer-reviewed 2,568-dimensional machine learning PE triage, YARA pattern matching, volatile memory code-injection scanning, and automated ransomware mitigation into an autonomous Windows NT service, interactive management dashboard, and administrative CLI.
+**v2.1 — Cross-Platform Endpoint Protection**
+
+Sentinel Antivirus is an open-source, production-grade endpoint protection and automated threat response suite for **Windows**, **Linux**, and **macOS**. Engineered as a complete standalone security platform, Sentinel combines real-time filesystem monitoring, peer-reviewed 2,568-dimensional machine learning PE triage, YARA pattern matching, volatile memory code-injection scanning, and automated ransomware mitigation into autonomous background daemons, interactive management dashboards, and administrative CLIs across all three major operating systems.
+
+### Platform Support Matrix
+
+| Feature | Windows | Linux | macOS |
+|---|:---:|:---:|:---:|
+| YARA Rule Engine | ✅ | ✅ | ✅ |
+| EMBER2024 ML PE Scanner | ✅ | ✅ | ✅ |
+| Real-time FS Monitoring | ✅ (Minifilter + Watchdog) | ✅ (fanotify + Watchdog) | ✅ (FSEvents) |
+| Memory Injection Scanner | ✅ (Win32 API) | ✅ (/proc/pid/mem) | ✅ (psutil mmap) |
+| Process Event Monitoring | ✅ (ETW) | ✅ (auditd) | ✅ (log stream) |
+| System Event Monitoring | ✅ (Event Log) | ✅ (journald) | ✅ (Unified Logging) |
+| Signature Verification | ✅ (Authenticode) | ✅ (dpkg/rpm/GPG) | ✅ (codesign) |
+| Background Service | ✅ (Windows Service) | ✅ (systemd) | ✅ (launchd) |
+| IPC (GUI ↔ Service) | ✅ (Named Pipes) | ✅ (Unix Socket) | ✅ (Unix Socket) |
+| Kernel Enforcement | ✅ (Minifilter Driver) | ✅ (fanotify FAN_DENY) | ❌ (requires ESF entitlement) |
+| Desktop GUI Dashboard | ✅ (Tk) | ✅ (Tk) | ✅ (Tk) |
+| Ransomware Canary Defense | ✅ | ✅ | ✅ |
+| Honeypot Deception | ✅ | ✅ | ✅ |
 
 ---
 
@@ -262,18 +282,58 @@ python -m sentinel.tests.battle_test_suite
 
 ## Standalone Binary Build
 
-Sentinel includes a PyInstaller build specification (`sentinel.spec` and `build_dist.py`) that compiles the entire suite into standalone Windows executables with no external Python dependency:
+Sentinel includes PyInstaller build specifications for all three platforms that compile the entire suite into standalone executables with no external Python dependency.
 
+### Windows Build
 ```powershell
-python build_dist.py
+python build_dist.py --target windows
+```
+Generated outputs in `dist\Sentinel\`:
+- `sentinel_gui.exe` (Interactive Dashboard)
+- `sentinel_cli.exe` (Command-Line Scanner)
+- `sentinel_service.exe` (Windows Background Service)
+- `sentinel_tray.exe` (System Tray Utility)
+- `dist\Sentinel-Antivirus-v2.1-Windows-Setup.zip`
+
+### Linux Build
+```bash
+pip install -r requirements-linux.txt
+python build_dist.py --target linux
+sudo bash dist/Sentinel/install-sentinel.sh
+```
+Generated outputs in `dist/Sentinel/`:
+- `sentinel_service` (systemd Background Daemon)
+- `sentinel_gui` (Tk Desktop Dashboard)
+- `sentinel_cli` (Command-Line Scanner)
+- `dist/Sentinel-Antivirus-v2.1-Linux-x86_64.tar.gz`
+
+**Quick start after install:**
+```bash
+sudo systemctl start sentinel          # Start daemon
+sentinel scan /path/to/suspicious/file  # CLI scan
+sentinel_gui                            # Launch GUI
 ```
 
-Generated outputs in `dist\Sentinel\`:
-- `sentinel_gui.exe` (Interactive PyQt6 Dashboard)
-- `sentinel_cli.exe` (Command-Line Scanner)
-- `sentinel_service.exe` (Windows Background Telemetry Service)
-- `sentinel_tray.exe` (System Tray Utility)
-- `dist\Sentinel-Antivirus-v2.0-Setup.zip` (Portable distribution archive)
+### macOS Build
+```bash
+pip install -r requirements-macos.txt
+python build_dist.py --target macos
+bash dist/Sentinel/install-sentinel.sh
+```
+Generated outputs in `dist/Sentinel/`:
+- `sentinel_service` (launchd Background Daemon)
+- `sentinel_gui` (Tk Desktop Dashboard)
+- `sentinel_cli` (Command-Line Scanner)
+- `dist/Sentinel-Antivirus-v2.1-macOS-Universal.tar.gz`
+
+**Quick start after install:**
+```bash
+launchctl load ~/Library/LaunchAgents/com.sentinel.antivirus.plist  # Start daemon
+sentinel scan /path/to/suspicious/file                               # CLI scan
+sentinel_gui                                                         # Launch GUI
+```
+
+> **Note:** For full real-time monitoring on macOS, grant Full Disk Access to `sentinel_service` in System Settings > Privacy & Security.
 
 ---
 

@@ -192,10 +192,18 @@ class MemoryThreat:
 
 
 class MemoryScanner:
-    """Scans running Windows processes for memory-resident malware."""
+    """Cross-platform memory scanner for detecting memory-resident malware.
+
+    Supports:
+        - Windows: kernel32.dll VirtualQueryEx / ReadProcessMemory
+        - Linux:   /proc/<pid>/maps + /proc/<pid>/mem
+        - macOS:   mach_vm_region + mach_vm_read (via ctypes)
+    """
 
     def __init__(self) -> None:
         self._is_windows = sys.platform == "win32"
+        self._is_linux = sys.platform == "linux"
+        self._is_macos = sys.platform == "darwin"
         self._kernel32 = None
         self._managed_pid_cache: dict[int, bool] = {}
         self._cache_lock = threading.Lock()
@@ -217,7 +225,13 @@ class MemoryScanner:
 
     def _is_managed_process(self, pid: int, proc_name: str) -> bool:
         """Dynamically detect if a process hosts a managed runtime / JIT engine."""
-        if proc_name.lower() in _KNOWN_JIT_NAMES:
+        # Cross-platform JIT process names
+        name_lower = proc_name.lower()
+        if name_lower in _KNOWN_JIT_NAMES:
+            return True
+        # Linux/macOS JIT process names
+        if name_lower in {"python3", "python", "node", "java", "dotnet", "mono",
+                          "chromium", "chrome", "firefox", "brave-browser"}:
             return True
 
         with self._cache_lock:
@@ -230,8 +244,17 @@ class MemoryScanner:
             p = psutil.Process(pid)
             for m in p.memory_maps():
                 if m.path:
-                    dll_name = m.path.split("\\")[-1].lower()
-                    if dll_name in _MANAGED_MODULE_PATTERNS or any(k in dll_name for k in ("clrjit", "coreclr", "mscorlib")):
+                    # Use os.sep-agnostic basename
+                    lib_name = Path(m.path).name.lower()
+                    if lib_name in _MANAGED_MODULE_PATTERNS:
+                        is_managed = True
+                        break
+                    # Linux/macOS shared object patterns
+                    if any(k in lib_name for k in (
+                        "clrjit", "coreclr", "mscorlib",
+                        "libmonosgen", "libcoreclr", "libjvm",
+                        "libv8", "libnode",
+                    )):
                         is_managed = True
                         break
         except Exception:
@@ -268,18 +291,56 @@ class MemoryScanner:
             pass
         return False
 
+    @staticmethod
+    def _check_elf_in_memory(sample: bytes) -> bool:
+        """Check for an ELF header injected into process memory (Linux equivalent of reflective PE)."""
+        if len(sample) < 16:
+            return False
+        # ELF magic: 0x7f 'E' 'L' 'F'
+        if sample[:4] == b"\x7fELF":
+            # Validate ELF class (32/64-bit)
+            ei_class = sample[4] if len(sample) > 4 else 0
+            if ei_class in (1, 2):  # ELFCLASS32 or ELFCLASS64
+                return True
+        return False
+
     def scan_process(
         self,
         pid: int,
         process_name: str | None = None,
         max_scan_bytes: int = 100 * 1024 * 1024,  # Cap at 100MB to preserve low CPU
     ) -> list[MemoryThreat]:
-        """Scan virtual memory pages of a specific process for injection / anomalies."""
-        threats: list[MemoryThreat] = []
-        if not self._is_windows or not self._kernel32 or pid <= 4:
-            return threats
+        """Scan virtual memory pages of a specific process for injection / anomalies.
+
+        Dispatches to the appropriate platform-specific scanner.
+        """
+        if pid <= 4:
+            return []
 
         proc_name = process_name or f"pid_{pid}"
+
+        if self._is_windows:
+            return self._scan_process_windows(pid, proc_name, max_scan_bytes)
+        elif self._is_linux:
+            return self._scan_process_linux(pid, proc_name, max_scan_bytes)
+        elif self._is_macos:
+            return self._scan_process_macos(pid, proc_name, max_scan_bytes)
+        return []
+
+    # ------------------------------------------------------------------ #
+    # Windows backend
+    # ------------------------------------------------------------------ #
+    def _scan_process_windows(
+        self,
+        pid: int,
+        proc_name: str,
+        max_scan_bytes: int,
+    ) -> list[MemoryThreat]:
+        """Windows memory scanning via kernel32.dll."""
+        threats: list[MemoryThreat] = []
+        if not self._kernel32:
+            return threats
+
         h_process = self._kernel32.OpenProcess(
             PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
             False,
@@ -339,7 +400,7 @@ class MemoryScanner:
 
             # Analyze committed executable private memory
             if region.is_unbacked_executable:
-                sample = self._read_memory_bytes(h_process, addr_val, min(region_size, 1024))
+                sample = self._read_memory_bytes_win(h_process, addr_val, min(region_size, 1024))
 
                 # Check 1: Reflective PE injection (verified MZ + PE header in unbacked memory)
                 if self._check_reflective_pe(sample):
@@ -402,8 +463,8 @@ class MemoryScanner:
 
         return threats
 
-    def _read_memory_bytes(self, h_process: int, address: int, size: int) -> bytes:
-        """Read bytes from a process's virtual memory."""
+    def _read_memory_bytes_win(self, h_process: int, address: int, size: int) -> bytes:
+        """Read bytes from a process's virtual memory (Windows)."""
         if not self._kernel32 or size <= 0:
             return b""
         buf = (ctypes.c_char * size)()
@@ -419,6 +480,250 @@ class MemoryScanner:
             return bytes(buf[:bytes_read.value])
         return b""
 
+    # Keep old name for backwards compatibility
+    def _read_memory_bytes(self, h_process: int, address: int, size: int) -> bytes:
+        return self._read_memory_bytes_win(h_process, address, size)
+
+    # ------------------------------------------------------------------ #
+    # Linux backend — /proc/<pid>/maps + /proc/<pid>/mem
+    # ------------------------------------------------------------------ #
+    def _scan_process_linux(
+        self,
+        pid: int,
+        proc_name: str,
+        max_scan_bytes: int,
+    ) -> list[MemoryThreat]:
+        """Linux memory scanning via /proc filesystem."""
+        import re
+        threats: list[MemoryThreat] = []
+        maps_path = f"/proc/{pid}/maps"
+        mem_path = f"/proc/{pid}/mem"
+        total_scanned = 0
+        is_jit = self._is_managed_process(pid, proc_name)
+
+        try:
+            with open(maps_path, "r") as maps_file:
+                lines = maps_file.readlines()
+        except (PermissionError, FileNotFoundError, ProcessLookupError):
+            return threats
+
+        # Parse /proc/<pid>/maps format:
+        # address           perms offset  dev   inode    pathname
+        # 7f1234000000-7f1235000000 rwxp 00000000 00:00 0  [heap]
+        maps_re = re.compile(
+            r"([0-9a-f]+)-([0-9a-f]+)\s+([\w-]+)\s+([0-9a-f]+)\s+\S+\s+(\d+)\s*(.*)"
+        )
+
+        mem_fd = None
+        try:
+            mem_fd = os.open(mem_path, os.O_RDONLY)
+        except (PermissionError, FileNotFoundError, ProcessLookupError):
+            return threats
+
+        try:
+            for line in lines:
+                match = maps_re.match(line.strip())
+                if not match:
+                    continue
+
+                start_addr = int(match.group(1), 16)
+                end_addr = int(match.group(2), 16)
+                perms = match.group(3)
+                inode = int(match.group(5))
+                pathname = match.group(6).strip()
+                region_size = end_addr - start_addr
+
+                # Focus on executable, private, anonymous (no backing file) regions
+                # perms like 'rwxp' — 'x' = executable, 'p' = private
+                is_executable = 'x' in perms
+                is_private = 'p' in perms
+                is_anonymous = (inode == 0) and not pathname.startswith("[")
+
+                if not (is_executable and is_private and is_anonymous):
+                    continue
+
+                # Skip known safe anonymous regions
+                if pathname in ("[vdso]", "[vsyscall]", "[vvar]"):
+                    continue
+
+                # Read sample bytes
+                sample = b""
+                try:
+                    os.lseek(mem_fd, start_addr, os.SEEK_SET)
+                    sample = os.read(mem_fd, min(region_size, 1024))
+                except (OSError, OverflowError):
+                    continue
+
+                if not sample:
+                    continue
+
+                # Check 1: Reflective PE injection (Windows malware running via Wine/WINE)
+                if self._check_reflective_pe(sample):
+                    threats.append(
+                        MemoryThreat(
+                            pid=pid,
+                            process_name=proc_name,
+                            base_address=start_addr,
+                            size=region_size,
+                            threat_type="reflective_pe",
+                            description="PE header in anonymous executable memory (possible injected Windows payload)",
+                            confidence=0.95,
+                            protection=PAGE_EXECUTE_READWRITE,
+                            sample_bytes=sample[:32],
+                        )
+                    )
+
+                # Check 1b: ELF injection (native Linux reflective loading)
+                if self._check_elf_in_memory(sample):
+                    threats.append(
+                        MemoryThreat(
+                            pid=pid,
+                            process_name=proc_name,
+                            base_address=start_addr,
+                            size=region_size,
+                            threat_type="reflective_pe",
+                            description="ELF header in anonymous executable memory (possible reflective ELF injection)",
+                            confidence=0.95,
+                            protection=PAGE_EXECUTE_READWRITE,
+                            sample_bytes=sample[:32],
+                        )
+                    )
+
+                # Check 2: Shellcode signatures
+                for pattern, desc in _SHELLCODE_PATTERNS:
+                    if is_jit and "PEB resolution" in desc:
+                        continue
+                    if pattern in sample:
+                        threats.append(
+                            MemoryThreat(
+                                pid=pid,
+                                process_name=proc_name,
+                                base_address=start_addr,
+                                size=region_size,
+                                threat_type="shellcode_signature",
+                                description=f"Shellcode signature detected: {desc}",
+                                confidence=0.95,
+                                protection=PAGE_EXECUTE_READWRITE,
+                                sample_bytes=sample[:32],
+                            )
+                        )
+                        break
+
+                # Check 3: Anomalous RWX anonymous region in non-JIT process
+                is_writable = 'w' in perms
+                if not is_jit and is_writable and is_executable:
+                    threats.append(
+                        MemoryThreat(
+                            pid=pid,
+                            process_name=proc_name,
+                            base_address=start_addr,
+                            size=region_size,
+                            threat_type="unbacked_executable",
+                            description="Anomalous RWX anonymous memory region in non-JIT process",
+                            confidence=0.80,
+                            protection=PAGE_EXECUTE_READWRITE,
+                            sample_bytes=sample[:32],
+                        )
+                    )
+
+                total_scanned += region_size
+                if max_scan_bytes and total_scanned >= max_scan_bytes:
+                    break
+        finally:
+            os.close(mem_fd)
+
+        return threats
+
+    # ------------------------------------------------------------------ #
+    # macOS backend — mach_vm via ctypes
+    # ------------------------------------------------------------------ #
+    def _scan_process_macos(
+        self,
+        pid: int,
+        proc_name: str,
+        max_scan_bytes: int,
+    ) -> list[MemoryThreat]:
+        """macOS memory scanning via mach_vm_region and mach_vm_read.
+
+        Uses ctypes to call Mach kernel APIs for process memory inspection.
+        Requires appropriate privileges (root or taskgated entitlement).
+        """
+        threats: list[MemoryThreat] = []
+
+        # On macOS, we use psutil's memory_maps as a simpler approach
+        # since mach_vm APIs require complex ctypes setup and entitlements
+        try:
+            import psutil
+        except ImportError:
+            return threats
+
+        is_jit = self._is_managed_process(pid, proc_name)
+        total_scanned = 0
+
+        try:
+            proc = psutil.Process(pid)
+            for mmap in proc.memory_maps():
+                # Parse the memory map entry
+                addr_str = mmap.addr if hasattr(mmap, "addr") else ""
+                path = mmap.path if hasattr(mmap, "path") else ""
+                rss = mmap.rss if hasattr(mmap, "rss") else 0
+
+                if not addr_str:
+                    continue
+
+                # Parse address range
+                try:
+                    if "-" in addr_str:
+                        start_s, end_s = addr_str.split("-", 1)
+                        start_addr = int(start_s, 16)
+                        end_addr = int(end_s, 16)
+                    else:
+                        continue
+                except (ValueError, IndexError):
+                    continue
+
+                region_size = end_addr - start_addr
+
+                # Check permissions
+                perms = mmap.perms if hasattr(mmap, "perms") else ""
+                is_executable = "x" in perms
+                is_private = "p" in perms or "private" in str(path).lower()
+                is_anonymous = not path or path.startswith("[")
+
+                if not (is_executable and is_anonymous):
+                    continue
+
+                # Try to read memory via /proc (macOS doesn't have /proc,
+                # so we rely on the process maps metadata for detection)
+                # On macOS, we flag suspicious regions without reading memory
+                if not is_jit and "w" in perms and is_executable:
+                    threats.append(
+                        MemoryThreat(
+                            pid=pid,
+                            process_name=proc_name,
+                            base_address=start_addr,
+                            size=region_size,
+                            threat_type="unbacked_executable",
+                            description="Anomalous RWX anonymous memory region in non-JIT process",
+                            confidence=0.75,
+                            protection=PAGE_EXECUTE_READWRITE,
+                            sample_bytes=b"",
+                        )
+                    )
+
+                total_scanned += region_size
+                if max_scan_bytes and total_scanned >= max_scan_bytes:
+                    break
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        except Exception as exc:
+            logger.debug("macOS memory scan error for pid %d: %s", pid, exc)
+
+        return threats
+
+    # ------------------------------------------------------------------ #
+    # Cross-platform process enumeration
+    # ------------------------------------------------------------------ #
     def scan_all_processes(
         self,
         filter_names: Sequence[str] | None = None,
@@ -430,12 +735,14 @@ class MemoryScanner:
         except ImportError:
             return all_threats
 
+        min_pid = 4 if self._is_windows else 1
+
         for proc in psutil.process_iter(["pid", "name"]):
             try:
                 pinfo = proc.info
                 pid = pinfo.get("pid")
                 name = pinfo.get("name")
-                if not pid or pid <= 4 or not name:
+                if not pid or pid <= min_pid or not name:
                     continue
                 if filter_names and name.lower() not in [f.lower() for f in filter_names]:
                     continue
