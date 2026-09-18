@@ -20,6 +20,7 @@ from typing import Callable, Iterable, Sequence
 from sentinel.engine.memory_scanner import MemoryScanner
 from sentinel.engine.static_classifier import StaticClassifier, _read_and_hash, extract_pe_features
 from sentinel.response.quarantine_store import QuarantineStore
+from sentinel.sandbox.runner import SandboxRunner
 
 logger = logging.getLogger("sentinel.scanner")
 
@@ -144,6 +145,7 @@ class OnDemandScanner:
         rules_dir: str | Path | None = None,
         auto_quarantine: bool = False,
         read_only_mode: bool | None = None,
+        dynamic_analysis: bool = True,
     ) -> None:
         self.classifier = classifier or StaticClassifier(yara_rules_dir=rules_dir)
         self.quarantine_store = quarantine_store
@@ -152,6 +154,8 @@ class OnDemandScanner:
             self.read_only_mode = not auto_quarantine
         else:
             self.read_only_mode = read_only_mode
+        self.dynamic_analysis = dynamic_analysis
+        self.sandbox_runner = SandboxRunner()
         self.memory_scanner = MemoryScanner()
 
         self._status = ScanStatus.IDLE
@@ -341,6 +345,41 @@ class OnDemandScanner:
                                     engine="ember2024_ml",
                                     description=f"EMBER2024 ML model classified as malware ({ml_prob*100:.1f}% confidence)",
                                 )
+
+        # 4. Dynamic Sandbox Analysis & Emulation
+        if not threat and getattr(self, "dynamic_analysis", True):
+            is_self = file_path.name.lower() in SENTINEL_SELF_BINARIES
+            is_exec_format = (
+                file_path.suffix.lower() in EXECUTABLE_EXTENSIONS
+                or file_data.startswith(b"MZ")
+                or file_data.startswith(b"\x7fELF")
+            )
+            if is_exec_format and not is_self:
+                try:
+                    sb_report = self.sandbox_runner.emulate_binary(file_path, raw_data=file_data)
+                    if sb_report.is_malicious:
+                        rule_name = sb_report.unpacked_yara_matches[0] if sb_report.unpacked_yara_matches else "DynamicMalware"
+                        threat = ThreatDetection(
+                            file_path=file_path,
+                            sha256=sha256,
+                            threat_name=f"Sandbox:{rule_name}",
+                            score=sb_report.risk_score or 85.0,
+                            severity=ThreatSeverity.CRITICAL if sb_report.unpacked_yara_matches else ThreatSeverity.HIGH,
+                            engine="dynamic_sandbox",
+                            description=f"Dynamic emulation identified threat: {'; '.join(sb_report.threat_reasons[:2])}",
+                        )
+                    elif sb_report.is_suspicious and sb_report.risk_score >= 35.0:
+                        threat = ThreatDetection(
+                            file_path=file_path,
+                            sha256=sha256,
+                            threat_name="Sandbox:SuspiciousBehavior",
+                            score=sb_report.risk_score,
+                            severity=ThreatSeverity.MEDIUM,
+                            engine="dynamic_sandbox",
+                            description=f"Dynamic emulation flagged suspicious activity: {'; '.join(sb_report.threat_reasons[:2])}",
+                        )
+                except Exception as exc:
+                    logger.debug("Dynamic emulation skipped for %s: %s", file_path, exc)
 
         # Optional auto-quarantine (strictly inhibited when read_only_mode is active or for memory threats)
         if threat and not threat.is_memory and not self.read_only_mode and self.auto_quarantine and self.quarantine_store:

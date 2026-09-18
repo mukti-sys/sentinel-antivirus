@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 import pytest
 
-from sentinel.cli_entry import cmd_status, cmd_scan, cmd_canaries, cmd_quarantine, main
+from sentinel.cli_entry import cmd_status, cmd_scan, cmd_sandbox, cmd_canaries, cmd_quarantine, main
 
 
 class TestCliEntry:
@@ -61,6 +61,17 @@ class TestCliEntry:
             assert code == 0
             captured = capsys.readouterr().out
             assert "empty" in captured
+
+    def test_cmd_sandbox(self, capsys, tmp_path):
+        dummy = tmp_path / "dummy.exe"
+        dummy.write_bytes(b"\x90\x90\xC3")
+        args = argparse.Namespace(target=str(dummy), mode="emulation", timeout=3.0)
+        code = cmd_sandbox(args)
+        assert code == 0
+        captured = capsys.readouterr().out
+        assert "SENTINEL DYNAMIC SANDBOX STUDIO" in captured
+        assert "Verdict" in captured
+        assert "BENIGN" in captured
 
     def test_main_help_no_args(self, capsys):
         with patch("sys.argv", ["sentinel"]):

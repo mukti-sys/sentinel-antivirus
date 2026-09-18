@@ -1,21 +1,22 @@
-"""Sandbox Execution Runner — safely executes untrusted or ambiguous binaries
-in isolated Windows Job Objects to analyze runtime behavior.
+"""Sandbox Execution Runner — executes and emulates untrusted or ambiguous binaries.
 
-Monitors:
-- Files dropped/created in sandbox workspace
-- Entropy surges in created files (ransomware activity)
-- Dropped executable files or script extensions
-- Child process spawning and unexpected crash behavior
+Combines two complementary dynamic analysis engines:
+1. Safe User-Space Emulation (DynamicEmulator):
+   - Fast (<100ms), zero-risk x86/x64 instruction & API emulator
+   - Intercepts anti-debug & evasion techniques
+   - Tracks self-modifying / unpacking routines in memory
+   - Extracts unpacked payloads and scans with YARA
+
+2. Isolated Process Detonation (SandboxIsolation):
+   - Cross-platform process containment (Windows Job Objects, Linux namespaces/rlimit)
+   - Tracks filesystem modifications, dropped executables, and entropy spikes
+   - Guaranteed cleanup and process termination
 """
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 import logging
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -24,11 +25,11 @@ from typing import Any
 
 from sentinel.engine.scoring import Signal
 from sentinel.engine.static_classifier import _file_entropy
-from sentinel.sandbox.job_object import SandboxJobObject
+from sentinel.sandbox.emulator import DynamicEmulator, EmulationResult
+from sentinel.sandbox.isolation import SandboxIsolation
 
 logger = logging.getLogger("sentinel.sandbox.runner")
 
-# Suspicious extensions dropped during execution
 EXECUTABLE_DROPPED_EXTENSIONS = frozenset({
     ".exe", ".dll", ".sys", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".hta"
 })
@@ -45,10 +46,11 @@ class DroppedFile:
 
 @dataclass
 class SandboxReport:
-    """Telemetry report produced from sandbox execution."""
+    """Telemetry report produced from sandbox execution or emulation."""
     target_path: str
     duration_seconds: float
-    exit_code: int | None
+    exit_code: int | None = 0
+    analysis_mode: str = "emulation"  # "emulation", "detonation", or "hybrid"
     files_created: list[str] = field(default_factory=list)
     dropped_executables: list[str] = field(default_factory=list)
     max_entropy_observed: float = 0.0
@@ -61,6 +63,14 @@ class SandboxReport:
     dropped_files: list[DroppedFile] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
 
+    # Emulation-specific telemetry
+    instructions_executed: int = 0
+    api_calls: list[dict[str, Any]] = field(default_factory=list)
+    evasion_techniques: list[str] = field(default_factory=list)
+    unpacked_yara_matches: list[str] = field(default_factory=list)
+    rwx_allocations: int = 0
+    risk_score: float = 0.0
+
     @property
     def duration_sec(self) -> float:
         return self.duration_seconds
@@ -72,30 +82,67 @@ class SandboxReport:
     @property
     def is_malicious(self) -> bool:
         return (
-            len(self.dropped_executables) > 0 or
-            self.max_entropy_observed >= 7.6 or
-            any("ransomware" in r.lower() or "dropped" in r.lower() for r in self.threat_reasons)
+            len(self.dropped_executables) > 0
+            or self.max_entropy_observed >= 7.6
+            or len(self.unpacked_yara_matches) > 0
+            or self.risk_score >= 75.0
+            or any("malicious" in r.lower() or "ransomware" in r.lower() or "dropped" in r.lower() for r in self.threat_reasons)
         )
 
     @property
     def is_suspicious(self) -> bool:
-        return self.is_malicious or len(self.files_created) > 3 or bool(self.threat_reasons)
+        return (
+            self.is_malicious
+            or len(self.files_created) > 3
+            or len(self.evasion_techniques) > 0
+            or self.rwx_allocations > 0
+            or self.risk_score >= 35.0
+            or bool(self.threat_reasons)
+        )
 
     def to_signals(self, pid: int | None = None) -> list[Signal]:
+        """Convert sandbox findings into typed detection signals for Scorer."""
         signals: list[Signal] = []
         subject = f"file:{Path(self.target_path).name}" if not pid else f"pid:{pid}"
 
-        if self.is_malicious:
+        # 1. Unpacked memory matched YARA rules
+        if self.unpacked_yara_matches:
+            signals.append(
+                Signal(
+                    kind="sandbox_unpacked_yara",
+                    subject=subject,
+                    engine="sandbox",
+                    reason=f"Sandbox emulator unpacked malware matching YARA: {', '.join(self.unpacked_yara_matches)}",
+                    weight=90.0,
+                )
+            )
+
+        # 2. Confirmed malicious detonation behavior
+        elif self.is_malicious:
             signals.append(
                 Signal(
                     kind="sandbox_malicious",
                     subject=subject,
                     engine="sandbox",
-                    reason=f"Sandbox execution confirmed malicious behavior: {'; '.join(self.threat_reasons)}",
+                    reason=f"Sandbox confirmed malicious behavior: {'; '.join(self.threat_reasons)}",
                     weight=85.0,
                 )
             )
-        elif self.is_suspicious:
+
+        # 3. Evasion techniques detected
+        if self.evasion_techniques:
+            signals.append(
+                Signal(
+                    kind="sandbox_evasion_detected",
+                    subject=subject,
+                    engine="sandbox",
+                    reason=f"Sandbox detected anti-analysis evasion: {', '.join(self.evasion_techniques[:3])}",
+                    weight=35.0,
+                )
+            )
+
+        # 4. General suspicious activity
+        if self.is_suspicious and not self.is_malicious and not signals:
             signals.append(
                 Signal(
                     kind="sandbox_suspicious",
@@ -110,25 +157,68 @@ class SandboxReport:
 
 
 class SandboxRunner:
-    """Executes target binary inside an isolated Job Object and analyzes behavior."""
+    """Executes target binary inside an isolated sandbox and analyzes behavior."""
 
     def __init__(
         self,
-        max_duration_seconds: float = 8.0,
+        max_duration_seconds: float = 5.0,
         max_memory_mb: int = 128,
         cpu_percent_limit: int = 20,
     ) -> None:
         self.max_duration_seconds = max_duration_seconds
         self.max_memory_mb = max_memory_mb
         self.cpu_percent_limit = cpu_percent_limit
-        self._is_windows = sys.platform == "win32"
+        self.emulator = DynamicEmulator(max_seconds=max_duration_seconds)
+        self.isolation = SandboxIsolation(
+            max_memory_mb=max_memory_mb,
+            cpu_percent_limit=cpu_percent_limit,
+            max_duration_seconds=max_duration_seconds,
+        )
+
+    def emulate_binary(self, binary_path: str | Path, raw_data: bytes | None = None) -> SandboxReport:
+        """Run safe user-space in-memory CPU and API emulation."""
+        target = Path(binary_path).resolve()
+        res: EmulationResult = self.emulator.emulate(target, raw_data=raw_data)
+
+        api_dicts = [
+            {"api": call.api_name, "category": call.category, "ret": call.return_value}
+            for call in res.api_calls
+        ]
+
+        findings = [
+            {"category": "API", "detail": f"Called {call.api_name} ({call.category})", "severity": "MEDIUM"}
+            for call in res.api_calls
+        ]
+        findings.extend([
+            {"category": "Evasion", "detail": ev, "severity": "HIGH"}
+            for ev in res.evasion_techniques
+        ])
+        findings.extend([
+            {"category": "YARA", "detail": f"Unpacked signature: {rule}", "severity": "CRITICAL"}
+            for rule in res.unpacked_yara_matches
+        ])
+
+        return SandboxReport(
+            target_path=str(target),
+            duration_seconds=res.duration_seconds,
+            exit_code=0 if not res.error else -1,
+            analysis_mode="emulation",
+            threat_reasons=res.threat_reasons,
+            instructions_executed=res.instructions_executed,
+            api_calls=api_dicts,
+            evasion_techniques=res.evasion_techniques,
+            unpacked_yara_matches=res.unpacked_yara_matches,
+            rwx_allocations=res.rwx_allocations,
+            risk_score=res.risk_score,
+            findings=findings,
+        )
 
     def run_binary(
         self,
         binary_path: str | Path,
         args: list[str] | None = None,
     ) -> SandboxReport:
-        """Run a binary in the sandbox workspace and return a behavior report."""
+        """Run a binary in an isolated OS workspace and observe behavior."""
         target = Path(binary_path).resolve()
         if not target.exists():
             raise FileNotFoundError(f"Binary not found: {target}")
@@ -138,7 +228,11 @@ class SandboxRunner:
 
         # Copy target binary into isolated workspace
         sandbox_bin = temp_dir / target.name
-        shutil.copy2(target, sandbox_bin)
+        try:
+            shutil.copy2(target, sandbox_bin)
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError(f"Failed to stage binary for sandbox: {exc}")
 
         start_time = time.time()
         files_created: list[str] = []
@@ -146,26 +240,14 @@ class SandboxRunner:
         dropped_file_objects: list[DroppedFile] = []
         max_entropy = 0.0
         reasons: list[str] = []
-        exit_code: int | None = None
 
         try:
-            if self._is_windows:
-                exit_code = self._run_windows_sandbox(
-                    sandbox_bin,
-                    cmd_args,
-                    temp_dir,
-                    self.max_duration_seconds,
-                )
-            else:
-                # Fallback for mock/test runs on non-Windows
-                proc = subprocess.Popen([str(sandbox_bin)] + cmd_args, cwd=str(temp_dir))
-                try:
-                    exit_code = proc.wait(timeout=self.max_duration_seconds)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    exit_code = -1
-
-            duration = time.time() - start_time
+            cmd = [str(sandbox_bin)] + cmd_args
+            exit_code, timed_out = self.isolation.run_isolated(
+                cmd=cmd,
+                work_dir=temp_dir,
+                timeout=self.max_duration_seconds,
+            )
 
             # Analyze filesystem artifacts generated in sandbox directory
             for root, _, files in os.walk(temp_dir):
@@ -213,10 +295,12 @@ class SandboxRunner:
             for r in reasons
         ]
 
+        duration = round(time.time() - start_time, 2)
         return SandboxReport(
             target_path=str(target),
-            duration_seconds=round(time.time() - start_time, 2),
+            duration_seconds=duration,
             exit_code=exit_code,
+            analysis_mode="detonation",
             files_created=files_created,
             dropped_executables=dropped_execs,
             max_entropy_observed=round(max_entropy, 2),
@@ -224,9 +308,37 @@ class SandboxRunner:
             peak_memory_mb=round(max(2.4, float(len(files_created) * 1.8)), 1),
             max_memory_mb=self.max_memory_mb,
             cpu_rate_pct=self.cpu_percent_limit,
+            timed_out=timed_out,
             dropped_files=dropped_file_objects,
             findings=findings,
+            risk_score=85.0 if dropped_execs or max_entropy >= 7.6 else (35.0 if reasons else 0.0),
         )
+
+    def analyze(
+        self,
+        executable_path: str | Path,
+        mode: str = "emulation",  # "emulation", "detonation", or "hybrid"
+        args: list[str] | None = None,
+    ) -> SandboxReport:
+        """Unified dynamic analysis entry point."""
+        if mode == "detonation":
+            return self.run_binary(executable_path, args=args)
+        elif mode == "hybrid":
+            # 1. Run safe emulation first
+            report = self.emulate_binary(executable_path)
+            if report.is_malicious:
+                return report
+            # 2. If inconclusive, run isolated execution
+            detonation_report = self.run_binary(executable_path, args=args)
+            # Combine findings
+            detonation_report.api_calls = report.api_calls
+            detonation_report.evasion_techniques = report.evasion_techniques
+            detonation_report.instructions_executed = report.instructions_executed
+            detonation_report.analysis_mode = "hybrid"
+            detonation_report.findings.extend(report.findings)
+            return detonation_report
+        else:
+            return self.emulate_binary(executable_path)
 
     def run(
         self,
@@ -239,41 +351,11 @@ class SandboxRunner:
         """Convenience method matching dashboard invocation semantics."""
         if timeout_sec is not None:
             self.max_duration_seconds = float(timeout_sec)
+            self.isolation.max_duration_seconds = float(timeout_sec)
         if max_memory_mb is not None:
             self.max_memory_mb = int(max_memory_mb)
+            self.isolation.max_memory_mb = int(max_memory_mb)
         if cpu_rate_pct is not None:
             self.cpu_percent_limit = int(cpu_rate_pct)
+            self.isolation.cpu_percent_limit = int(cpu_rate_pct)
         return self.run_binary(executable_path, args=args)
-
-    def _run_windows_sandbox(
-        self,
-        bin_path: Path,
-        args: list[str],
-        work_dir: Path,
-        timeout: float,
-    ) -> int | None:
-        """Launch process in workspace, bind to JobObject, and observe."""
-        cmd_list = [str(bin_path)] + args
-
-        with SandboxJobObject(
-            max_memory_mb=self.max_memory_mb,
-            cpu_percent_limit=self.cpu_percent_limit,
-        ) as job:
-            proc = subprocess.Popen(
-                cmd_list,
-                cwd=str(work_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # Assign process to Job Object
-            job.assign_process(int(proc._handle))
-
-            # Wait for timeout or process exit
-            try:
-                exit_code = proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                exit_code = -1
-
-            return exit_code

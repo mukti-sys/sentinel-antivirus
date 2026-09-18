@@ -70,7 +70,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print("=" * 70)
 
     from sentinel.engine.scanner import OnDemandScanner
-    scanner = OnDemandScanner(read_only_mode=True)
+    use_dynamic = getattr(args, "dynamic", False)
+    scanner = OnDemandScanner(read_only_mode=True, dynamic_analysis=use_dynamic)
     threats_found = 0
 
     for f in pe_files:
@@ -89,6 +90,51 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(f"  [!] ALERT: {threats_found} suspicious or malicious file(s) identified.")
     print("=" * 70)
     return 1 if threats_found > 0 else 0
+
+
+def cmd_sandbox(args: argparse.Namespace) -> int:
+    """Perform dynamic analysis or emulation on a target binary."""
+    target = Path(args.target).resolve()
+    if not target.is_file():
+        print(f"[!] Error: target file not found: {target}")
+        return 1
+
+    from sentinel.sandbox.runner import SandboxRunner
+    runner = SandboxRunner(max_duration_seconds=args.timeout)
+
+    print("=" * 70)
+    print(f"  SENTINEL DYNAMIC SANDBOX STUDIO")
+    print(f"  Target : {target.name}")
+    print(f"  Mode   : {args.mode.upper()}")
+    print("=" * 70)
+
+    report = runner.analyze(target, mode=args.mode)
+
+    print(f"  Duration      : {report.duration_seconds:.2f}s")
+    verdict = "[CRITICAL MALICIOUS]" if report.is_malicious else ("[SUSPICIOUS]" if report.is_suspicious else "[BENIGN / CLEAN]")
+    print(f"  Verdict       : {verdict}")
+    print(f"  Risk Score    : {report.risk_score:.1f} / 100")
+    if report.instructions_executed:
+        print(f"  Instructions  : {report.instructions_executed} emulated")
+    if report.unpacked_yara_matches:
+        print(f"  Unpacked YARA : {', '.join(report.unpacked_yara_matches)}")
+    if report.evasion_techniques:
+        print(f"  Evasion Flags : {', '.join(report.evasion_techniques)}")
+    if report.api_calls:
+        print(f"  API Calls     : {len(report.api_calls)} intercepted")
+        for call in report.api_calls[:5]:
+            print(f"    - {call['api']} ({call['category']}) -> {call['ret']}")
+    if report.files_created:
+        print(f"  Files Created : {len(report.files_created)}")
+        for f in report.files_created[:3]:
+            print(f"    - {f}")
+    if report.threat_reasons:
+        print("\n  Findings:")
+        for r in report.threat_reasons:
+            print(f"    [!] {r}")
+
+    print("=" * 70)
+    return 1 if report.is_malicious else 0
 
 
 def cmd_canaries(args: argparse.Namespace) -> int:
@@ -114,9 +160,12 @@ def cmd_canaries(args: argparse.Namespace) -> int:
 
 
 def cmd_quarantine(args: argparse.Namespace) -> int:
-    """View quarantined threats."""
+    """List or inspect quarantine store."""
     store = QuarantineStore()
-    records = store.list_records(limit=args.limit)
+    if hasattr(store, "list_records"):
+        records = store.list_records(limit=args.limit)
+    else:
+        records = store.list_all()[:args.limit]
     print("=" * 70)
     print(f"  SENTINEL QUARANTINE VAULT ({len(records)} active records)")
     print("=" * 70)
@@ -144,6 +193,13 @@ def main() -> int:
     p_scan = subparsers.add_parser("scan", help="Scan a file or directory")
     p_scan.add_argument("path", help="Path to file or directory")
     p_scan.add_argument("-v", "--verbose", action="store_true", help="Show all files including clean")
+    p_scan.add_argument("--dynamic", action="store_true", default=False, help="Perform dynamic emulation on ambiguous binaries")
+
+    # sandbox
+    p_sandbox = subparsers.add_parser("sandbox", help="Perform dynamic analysis or isolated detonation on a binary")
+    p_sandbox.add_argument("target", help="Path to binary or executable to analyze")
+    p_sandbox.add_argument("--mode", choices=["emulation", "detonation", "hybrid"], default="emulation", help="Analysis mode (default: emulation)")
+    p_sandbox.add_argument("--timeout", type=float, default=5.0, help="Max execution timeout in seconds")
 
     # canaries
     p_canary = subparsers.add_parser("canaries", help="Inspect or manage ransomware honeypots")
@@ -163,6 +219,8 @@ def main() -> int:
         return cmd_status(args)
     if args.command == "scan":
         return cmd_scan(args)
+    if args.command == "sandbox":
+        return cmd_sandbox(args)
     if args.command == "canaries":
         return cmd_canaries(args)
     if args.command == "quarantine":

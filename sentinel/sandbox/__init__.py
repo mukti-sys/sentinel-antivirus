@@ -1,9 +1,23 @@
-"""Sentinel Behavioral Sandbox — executes untrusted binaries in isolated
-Windows Job Objects with strict CPU, memory, time, and UI limits.
+"""Sentinel Dynamic Analysis & Behavioral Sandbox — user-space CPU & API emulation
+and isolated process containment for untrusted binaries.
 """
 from __future__ import annotations
 
-from sentinel.sandbox.job_object import SandboxJobObject
-from sentinel.sandbox.runner import SandboxReport, SandboxRunner
+from sentinel.sandbox.emulator import DynamicEmulator, EmulationResult
+from sentinel.sandbox.isolation import SandboxIsolation
+from sentinel.sandbox.runner import DroppedFile, SandboxReport, SandboxRunner
 
-__all__ = ["SandboxJobObject", "SandboxRunner", "SandboxReport"]
+try:
+    from sentinel.sandbox.job_object import SandboxJobObject
+except ImportError:
+    SandboxJobObject = None  # type: ignore
+
+__all__ = [
+    "DynamicEmulator",
+    "EmulationResult",
+    "SandboxIsolation",
+    "SandboxJobObject",
+    "SandboxRunner",
+    "SandboxReport",
+    "DroppedFile",
+]

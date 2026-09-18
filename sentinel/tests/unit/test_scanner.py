@@ -176,3 +176,20 @@ def test_full_scan_targets_collection():
     assert isinstance(targets, list)
     assert len(targets) >= 1
     assert any("C:" in str(t).upper() for t in targets)
+
+
+def test_scan_triggers_dynamic_emulation(tmp_path):
+    """Verify OnDemandScanner invokes dynamic emulation for evasive/packing binaries."""
+    scanner = OnDemandScanner(read_only_mode=True, dynamic_analysis=True)
+
+    # Create dummy executable with self-decrypting loop / API hashing
+    sample = tmp_path / "packed_evasion.exe"
+    # Shellcode setting EAX to ROR13 VirtualAlloc hash, then ROR EAX 13, RDTSC, RET
+    shellcode = b"\xB8\x54\xCA\xAF\x91\xC1\xC8\x0D\x0F\x31\xC3"
+    sample.write_bytes(shellcode)
+
+    threat = scanner.scan_file(sample)
+    assert threat is not None
+    assert threat.engine == "dynamic_sandbox"
+    assert "Sandbox" in threat.threat_name
+

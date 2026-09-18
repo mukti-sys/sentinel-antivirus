@@ -21,6 +21,7 @@ Sentinel Antivirus is an open-source, production-grade endpoint protection and a
 | Desktop GUI Dashboard | ✅ (Tk) | ✅ (Tk) | ✅ (Tk) |
 | Ransomware Canary Defense | ✅ | ✅ | ✅ |
 | Honeypot Deception | ✅ | ✅ | ✅ |
+| Dynamic In-Memory Sandbox | ✅ | ✅ | ✅ |
 
 ---
 
@@ -103,6 +104,20 @@ Adversaries frequently disguise executable payloads by altering extensions (e.g.
 - **MIME & Structure Mismatch Heuristics:** Non-executable file extensions carrying executable header structures generate high-confidence masquerade signals (`pe_masquerade`, Threat Score 85).
 - **Execution-Phase Interception:** Even if an executable is disguised as an image on disk, the Windows OS requires the PE loader (`ntdll!LdrLoadDll` or `kernel32!CreateProcessW`) to execute native code. Any process spawn targeting a disguised binary is intercepted by Sentinel's filesystem sensor and process monitor.
 
+### Dynamic Analysis & In-Memory Sandbox (v2.2)
+Sentinel incorporates an automated behavioral sandbox designed to defeat packed, crypted, and evasive binaries without risking host stability:
+- **Zero-Risk In-Memory Emulation (`DynamicEmulator`):** Decodes and simulates x86/x64 CPU instructions entirely within Python virtual memory, never passing machine code or native syscalls to the host CPU:
+  - **Anti-Debug Interception:** Traps anti-analysis probes (`IsDebuggerPresent`, `CheckRemoteDebuggerPresent`, `RDTSC` timing attacks, `PEB.BeingDebugged`).
+  - **Dynamic API Resolution:** Unmasks runtime API hashing (PEB loader walking with ROR13 hashes for `VirtualAlloc`, `WriteProcessMemory`, `CreateRemoteThread`).
+  - **Memory Write & Unpack Tracking:** Detects memory encryption/decryption loops (`STOSB`, XOR decoders) and extracts in-memory payload buffers.
+  - **In-Memory YARA Rescanning:** Automatically feeds dynamically unpacked buffers back through the compiled YARA rule engine to detect malware signatures hidden by packers.
+- **Contained Process Detonation (`SandboxIsolation`):** Concurrently isolates untrusted processes within OS-native containment boundaries:
+  - **Windows:** Win32 Job Objects enforcing hard memory limits (128 MB), process lifetime ceilings, UI restrictions (`UIRestrictionsClass`), and automatic child process containment.
+  - **Linux:** Process isolation leveraging `setrlimit` (CPU/AS limits), `prctl(PR_SET_NO_NEW_PRIVS)`, and isolated process groups.
+  - **macOS:** Resource limit enforcement and subprocess isolation.
+- **Safety Guarantee:** Dynamic analysis is strictly **read-only** against target binaries. During process detonation, Sentinel executes against an isolated scratch copy in a sandboxed temporary directory and securely wipes the scratch directory upon exit. **Original target files are never modified, deleted, or corrupted.**
+
+
 ---
 
 ## Empirical Benchmarks & Verification Proofs
@@ -161,8 +176,8 @@ Automated evaluation tool (`sentinel/engine/harvest_system_pes.py`) extracting c
 - **Artifact:** Detailed execution telemetry persisted in `sentinel/data/system_pe_benchmark.json`.
 
 ### 4. Unit Test Suite
-- **Unit Test Count:** 331 unit tests passing (`pytest sentinel/tests/unit`).
-- **Coverage Areas:** EMBER2024 feature extraction, static PE classification, Authenticode verification, YARA compilation, scoring algorithms, ransomware heuristics, quarantine store operations, and UI event binding.
+- **Unit Test Count:** 342 unit tests passing (`pytest sentinel/tests/unit`).
+- **Coverage Areas:** EMBER2024 feature extraction, static PE classification, dynamic in-memory emulation, Job Object process isolation, Authenticode verification, YARA compilation, scoring algorithms, ransomware heuristics, quarantine store operations, and UI event binding.
 
 ---
 
@@ -211,6 +226,10 @@ sentinel/
 |   |-- schema.py              # Telemetry data schemas and event models
 |   |-- scoring.py             # Multi-signal aggregation and threat threshold scoring
 |   +-- static_classifier.py   # Dual-model EMBER2024 / LightGBM PE static classifier
+|-- sandbox/
+|   |-- emulator.py            # Pure in-memory x86/x64 instruction & Win32 API emulator
+|   |-- isolation.py           # Cross-platform process containment (Job Objects / rlimits)
+|   +-- runner.py              # Unified sandbox coordinator (emulation / detonation / hybrid)
 |-- intel/
 |   +-- virustotal_client.py   # VirusTotal v3 API client with offline circuit breaker
 |-- response/
@@ -265,11 +284,36 @@ dist\Sentinel\sentinel_gui.exe
 #### Headless CLI Scanner
 Scan a specific file or directory:
 ```powershell
-python -m sentinel.cli scan "C:\Users\Username\Downloads"
+python -m sentinel.cli_entry scan "C:\Users\Username\Downloads"
+```
+Scan with dynamic behavioral analysis enabled:
+```powershell
+python -m sentinel.cli_entry scan "C:\Users\Username\Downloads" --dynamic
 ```
 
+#### Dynamic Sandbox Analysis (CLI)
+Safely analyze any executable in pure in-memory emulation (< 100 ms, zero host risk):
+```powershell
+python -m sentinel.cli_entry sandbox "C:\path\to\suspicious.exe" --mode emulation
+```
+Detonate a process inside an isolated Job Object sandbox (CPU/RAM caps, UI restriction):
+```powershell
+python -m sentinel.cli_entry sandbox "C:\path\to\suspicious.exe" --mode detonation
+```
+Run hybrid analysis (fast emulation first, fallback to detonation if ambiguous):
+```powershell
+python -m sentinel.cli_entry sandbox "C:\path\to\suspicious.exe" --mode hybrid
+```
+
+#### Interactive Sandbox Studio (GUI)
+1. Launch the dashboard: `python -m sentinel.ui.dashboard`
+2. Navigate to the **🧪 Sandbox Studio** tab.
+3. Select an executable or binary sample.
+4. Choose the analysis mode: **⚡ Emulation** (safe in-memory), **🚀 Detonation** (contained process), or **🔬 Hybrid**.
+5. Click **Run Sandbox Analysis** to view live instruction logs, anti-debug evasions, resolved APIs, and threat score verdict.
+
 #### Run Verification Test Suites
-Run the 331-test unit suite:
+Run the 342-test unit suite:
 ```powershell
 pytest sentinel/tests/unit -q
 ```

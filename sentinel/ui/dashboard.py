@@ -97,6 +97,7 @@ class SentinelDashboard(tk.Tk):
         self._sandbox_duration_var = tk.StringVar(value="5")
         self._sandbox_mem_var = tk.StringVar(value="128")
         self._sandbox_cpu_var = tk.StringVar(value="20")
+        self._sandbox_mode_var = tk.StringVar(value="⚡ Emulation (Zero-VM)")
         self._sandbox_active = False
         self._memory_scan_active = False
         self._last_sandbox_report: SandboxReport | None = None
@@ -1418,6 +1419,18 @@ class SentinelDashboard(tk.Tk):
         row2 = tk.Frame(cfg_inner, bg=COLOR_SURFACE)
         row2.pack(fill="x", pady=(0, 5))
 
+        # Mode
+        tk.Label(row2, text="Mode:", font=("Segoe UI", 9), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(side="left", padx=(0, 4))
+        mode_combo = ttk.Combobox(
+            row2,
+            textvariable=self._sandbox_mode_var,
+            values=["⚡ Emulation (Zero-VM)", "🚀 Isolated Detonation", "🔬 Hybrid Analysis"],
+            state="readonly",
+            width=20,
+            font=("Segoe UI", 9),
+        )
+        mode_combo.pack(side="left", padx=(0, 15))
+
         # Timeout
         tk.Label(row2, text="Timeout (s):", font=("Segoe UI", 9), bg=COLOR_SURFACE, fg=COLOR_TEXT_SECONDARY).pack(side="left", padx=(0, 4))
         tk.Entry(row2, textvariable=self._sandbox_duration_var, width=4, font=("Segoe UI", 9), bg=COLOR_SURFACE_HOVER, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid").pack(side="left", padx=(0, 15))
@@ -1549,11 +1562,14 @@ class SentinelDashboard(tk.Tk):
 
     def _run_sandbox_worker(self, target: str, timeout: int, mem_mb: int, cpu_pct: int) -> None:
         try:
-            report = self.sandbox_runner.run(
+            mode_raw = self._sandbox_mode_var.get()
+            mode = "emulation" if "Emulation" in mode_raw else ("hybrid" if "Hybrid" in mode_raw else "detonation")
+            self.sandbox_runner.max_duration_seconds = float(timeout)
+            self.sandbox_runner.max_memory_mb = int(mem_mb)
+            self.sandbox_runner.cpu_percent_limit = int(cpu_pct)
+            report = self.sandbox_runner.analyze(
                 executable_path=target,
-                timeout_sec=timeout,
-                max_memory_mb=mem_mb,
-                cpu_rate_pct=cpu_pct,
+                mode=mode,
             )
         except Exception as exc:
             logger.error("Sandbox error: %s", exc)

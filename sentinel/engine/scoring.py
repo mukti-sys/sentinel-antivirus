@@ -86,9 +86,13 @@ WEIGHTS: dict[str, float] = {
     # Command & Control (C2) detection
     "c2_beaconing": 40.0,             # automated periodic beaconing (low jitter)
     "c2_threat_intel": 85.0,          # known malicious C2 IP/domain/port match (fires alone)
-    # Behavioral sandbox execution
+    # Behavioral sandbox execution & dynamic emulation
     "sandbox_malicious": 85.0,        # sandbox observed malicious behavior (fires alone)
     "sandbox_suspicious": 35.0,       # sandbox observed suspicious anomalies
+    "sandbox_unpacked_yara": 90.0,    # emulator unpacked payload matching YARA rule (fires alone)
+    "sandbox_injection_chain": 75.0,  # emulated injection API sequence (VirtualAllocEx + WriteProcessMemory)
+    "sandbox_rwx_unpack": 50.0,       # self-decrypting unpacking routine writing to RWX memory
+    "sandbox_evasion_detected": 35.0, # anti-analysis evasion or timing checks detected
 }
 
 # The DLL signals that, *alone*, must never trigger a response
