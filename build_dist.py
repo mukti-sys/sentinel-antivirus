@@ -27,7 +27,7 @@ import time
 import zipfile
 from pathlib import Path
 
-VERSION = "2.1"
+VERSION = "2.2"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DIST_DIR = PROJECT_ROOT / "dist"
 BUILD_DIR = PROJECT_ROOT / "build"
@@ -147,6 +147,7 @@ def copy_deployment_helpers(target: str) -> None:
             ("Uninstall-Sentinel.ps1", "Uninstall-Sentinel.ps1"),
             ("service_manager.ps1", "service_manager.ps1"),
             ("README.md", "README.md"),
+            ("dist/RELEASE_NOTES.md", "RELEASE_NOTES.md"),
         ]
         # Copy driver binaries if compiled
         driver_sys = PROJECT_ROOT / "driver" / "SentinelFilter" / "x64" / "Debug" / "SentinelFilter.sys"

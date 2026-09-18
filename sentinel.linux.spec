@@ -51,6 +51,10 @@ hidden_imports = [
     "sentinel.response.notifier",
     "sentinel.response.quarantine_store",
     "sentinel.ui.dashboard",
+    "sentinel.sandbox",
+    "sentinel.sandbox.emulator",
+    "sentinel.sandbox.isolation",
+    "sentinel.sandbox.runner",
 ]
 
 # Bundled data assets
