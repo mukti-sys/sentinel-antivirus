@@ -1,6 +1,6 @@
 # Sentinel Antivirus
 
-**v2.1 — Cross-Platform Endpoint Protection**
+**v2.2 — Dynamic In-Memory Sandbox & Cross-Platform Endpoint Protection**
 
 Sentinel Antivirus is an open-source, production-grade endpoint protection and automated threat response suite for **Windows**, **Linux**, and **macOS**. Engineered as a complete standalone security platform, Sentinel combines real-time filesystem monitoring, peer-reviewed 2,568-dimensional machine learning PE triage, YARA pattern matching, volatile memory code-injection scanning, and automated ransomware mitigation into autonomous background daemons, interactive management dashboards, and administrative CLIs across all three major operating systems.
 
@@ -337,7 +337,7 @@ Generated outputs in `dist\Sentinel\`:
 - `sentinel_cli.exe` (Command-Line Scanner)
 - `sentinel_service.exe` (Windows Background Service)
 - `sentinel_tray.exe` (System Tray Utility)
-- `dist\Sentinel-Antivirus-v2.1-Windows-Setup.zip`
+- `dist\Sentinel-Antivirus-v2.2-Windows-Setup.zip`
 
 ### Linux Build
 ```bash
@@ -349,7 +349,7 @@ Generated outputs in `dist/Sentinel/`:
 - `sentinel_service` (systemd Background Daemon)
 - `sentinel_gui` (Tk Desktop Dashboard)
 - `sentinel_cli` (Command-Line Scanner)
-- `dist/Sentinel-Antivirus-v2.1-Linux-x86_64.tar.gz`
+- `dist/Sentinel-Antivirus-v2.2-Linux-x86_64.tar.gz`
 
 **Quick start after install:**
 ```bash
@@ -368,7 +368,7 @@ Generated outputs in `dist/Sentinel/`:
 - `sentinel_service` (launchd Background Daemon)
 - `sentinel_gui` (Tk Desktop Dashboard)
 - `sentinel_cli` (Command-Line Scanner)
-- `dist/Sentinel-Antivirus-v2.1-macOS-Universal.tar.gz`
+- `dist/Sentinel-Antivirus-v2.2-macOS-Universal.tar.gz`
 
 **Quick start after install:**
 ```bash
