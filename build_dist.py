@@ -108,6 +108,21 @@ def clean_previous_builds() -> None:
         _force_remove_tree(SENTINEL_DIST)
 
 
+def compile_native_core() -> None:
+    """Compile native sentinel_core acceleration library if cargo is installed."""
+    build_script = PROJECT_ROOT / "build_native.py"
+    if build_script.exists():
+        print("[*] Checking native Rust acceleration core compilation...")
+        try:
+            res = subprocess.run([sys.executable, str(build_script)], cwd=str(PROJECT_ROOT))
+            if res.returncode == 0:
+                print("[+] Native sentinel_core built successfully.")
+            else:
+                print("[!] Native core build skipped/failed; continuing with pure-Python fallback.")
+        except Exception as exc:
+            print(f"[!] Warning running build_native: {exc}")
+
+
 def run_pyinstaller(target: str) -> bool:
     """Invoke PyInstaller on the platform-appropriate spec file."""
     spec_file = SPEC_FILES.get(target)
@@ -276,6 +291,14 @@ def audit_distribution(target: str) -> None:
         else:
             print("  [?] Bundled PE Model embedded in archive")
 
+    # Check native core acceleration library
+    core_names = ["sentinel_core.dll", "libsentinel_core.so", "libsentinel_core.dylib"]
+    found_core = any((SENTINEL_DIST / name).exists() or (SENTINEL_DIST / "sentinel" / "engine" / name).exists() or (SENTINEL_DIST / "_internal" / "sentinel" / "engine" / name).exists() for name in core_names)
+    if found_core:
+        print("  [OK] Native Core (sentinel_core) - SIMD Hashing, Fast PE & Parallel Rayon Scanner")
+    else:
+        print("  [INFO] Pure-Python Engine Mode (Native Core optional)")
+
     print("-" * 75)
     if target == "windows":
         print(f"  Target Installation:  C:\\Program Files\\Sentinel Antivirus")
@@ -316,6 +339,7 @@ def main() -> int:
         return 1
 
     clean_previous_builds()
+    compile_native_core()
 
     if not run_pyinstaller(target):
         return 1

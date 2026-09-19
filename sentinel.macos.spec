@@ -70,11 +70,15 @@ datas = [
 # Filter datas — only include files that exist
 datas = [(src, dst) for src, dst in datas if any(Path(PROJECT_ROOT).glob(src))]
 
+# Native Rust acceleration shared library (if compiled)
+native_lib = PROJECT_ROOT / "sentinel" / "engine" / "libsentinel_core.dylib"
+binaries = [(str(native_lib), "sentinel/engine")] if native_lib.exists() else []
+
 # 1. Service/Daemon
 a_service = Analysis(
     ["sentinel/service.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -102,7 +106,7 @@ exe_service = EXE(
 a_gui = Analysis(
     ["sentinel/ui/dashboard.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -129,7 +133,7 @@ exe_gui = EXE(
 a_cli = Analysis(
     ["sentinel/cli_entry.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],

@@ -77,6 +77,11 @@ def _file_entropy(data: bytes) -> float:
     """Shannon entropy in bits/byte for a byte string."""
     if not data:
         return 0.0
+    try:
+        from sentinel.engine.native_core import fast_entropy
+        return fast_entropy(data)
+    except Exception:
+        pass
     counts = Counter(data)
     length = len(data)
     entropy = -sum(
@@ -497,7 +502,13 @@ def _read_and_hash(path: str | Path) -> tuple[str, bytes] | None:
         data = Path(path).read_bytes()
     except (OSError, PermissionError):
         return None
-    sha256 = hashlib.sha256(data).hexdigest()
+    try:
+        from sentinel.engine.native_core import fast_sha256
+        sha256 = fast_sha256(path)
+        if sha256 is None:
+            sha256 = hashlib.sha256(data).hexdigest()
+    except Exception:
+        sha256 = hashlib.sha256(data).hexdigest()
     return sha256, data
 
 

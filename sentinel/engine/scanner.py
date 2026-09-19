@@ -269,7 +269,18 @@ class OnDemandScanner:
                     )
 
         if not threat and (file_path.suffix.lower() in EXECUTABLE_EXTENSIONS or file_data.startswith(b"MZ")):
-            features = extract_pe_features(file_path, data=file_data)
+            if file_data.startswith(b"MZ"):
+                try:
+                    from sentinel.engine.native_core import fast_pe_triage
+                    pe_fast = fast_pe_triage(file_data)
+                    if pe_fast is not None and not pe_fast.is_pe:
+                        features = None
+                    else:
+                        features = extract_pe_features(file_path, data=file_data)
+                except Exception:
+                    features = extract_pe_features(file_path, data=file_data)
+            else:
+                features = extract_pe_features(file_path, data=file_data)
             if features is not None:
                 # Check for executable masquerading under non-executable extension
                 if file_path.suffix.lower() in DECEPTIVE_DOC_EXTENSIONS:
@@ -537,6 +548,7 @@ class OnDemandScanner:
         scan_type: ScanType = ScanType.CUSTOM,
         progress_callback: ProgressCallback | None = None,
         threat_callback: ThreatCallback | None = None,
+        workers: int = 1,
     ) -> ScanSummary:
         """Run scan synchronously over target paths."""
         with self._lock:
@@ -591,45 +603,94 @@ class OnDemandScanner:
 
             file_generator = self._collect_files(targets, quick_mode=quick_mode)
 
-            for file_path in file_generator:
-                # Handle pause
-                self._pause_event.wait()
+            if workers > 1:
+                import concurrent.futures
+                from concurrent.futures import ThreadPoolExecutor
 
-                # Handle cancel
-                if self._cancel_event.is_set():
-                    final_status = ScanStatus.CANCELLED
-                    break
+                prog_lock = threading.Lock()
+                file_list = list(file_generator)
 
-                progress.current_file = str(file_path)
-                progress.files_scanned += 1
-                progress.elapsed_seconds = time.time() - start_time
-
-                try:
-                    size = file_path.stat().st_size
-                    progress.bytes_scanned += size
-                except Exception:
-                    pass
-
-                # Perform scan
-                try:
-                    detection = self.scan_file(file_path)
-                    if detection:
-                        threats.append(detection)
-                        progress.threats_found += 1
-                        if threat_callback:
-                            try:
-                                threat_callback(detection)
-                            except Exception as cb_exc:
-                                logger.debug("threat_callback error: %s", cb_exc)
-                except Exception as scan_exc:
-                    logger.debug("Error scanning %s: %s", file_path, scan_exc)
-
-                # Report progress every file
-                if progress_callback:
+                def _worker_scan(fpath: Path):
+                    self._pause_event.wait()
+                    if self._cancel_event.is_set():
+                        return None
+                    det = None
                     try:
-                        progress_callback(progress)
-                    except Exception as cb_exc:
-                        logger.debug("progress_callback error: %s", cb_exc)
+                        det = self.scan_file(fpath)
+                    except Exception as scan_exc:
+                        logger.debug("Error scanning %s: %s", fpath, scan_exc)
+                    fsize = 0
+                    try:
+                        fsize = fpath.stat().st_size
+                    except Exception:
+                        pass
+                    with prog_lock:
+                        progress.files_scanned += 1
+                        progress.bytes_scanned += fsize
+                        progress.current_file = str(fpath)
+                        progress.elapsed_seconds = time.time() - start_time
+                        if det:
+                            threats.append(det)
+                            progress.threats_found += 1
+                        if progress_callback:
+                            try:
+                                progress_callback(progress)
+                            except Exception:
+                                pass
+                        if det and threat_callback:
+                            try:
+                                threat_callback(det)
+                            except Exception:
+                                pass
+                    return det
+
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = [executor.submit(_worker_scan, f) for f in file_list]
+                    for fut in concurrent.futures.as_completed(futures):
+                        if self._cancel_event.is_set():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            final_status = ScanStatus.CANCELLED
+                            break
+            else:
+                for file_path in file_generator:
+                    # Handle pause
+                    self._pause_event.wait()
+
+                    # Handle cancel
+                    if self._cancel_event.is_set():
+                        final_status = ScanStatus.CANCELLED
+                        break
+
+                    progress.current_file = str(file_path)
+                    progress.files_scanned += 1
+                    progress.elapsed_seconds = time.time() - start_time
+
+                    try:
+                        size = file_path.stat().st_size
+                        progress.bytes_scanned += size
+                    except Exception:
+                        pass
+
+                    # Perform scan
+                    try:
+                        detection = self.scan_file(file_path)
+                        if detection:
+                            threats.append(detection)
+                            progress.threats_found += 1
+                            if threat_callback:
+                                try:
+                                    threat_callback(detection)
+                                except Exception as cb_exc:
+                                    logger.debug("threat_callback error: %s", cb_exc)
+                    except Exception as scan_exc:
+                        logger.debug("Error scanning %s: %s", file_path, scan_exc)
+
+                    # Report progress every file
+                    if progress_callback:
+                        try:
+                            progress_callback(progress)
+                        except Exception as cb_exc:
+                            logger.debug("progress_callback error: %s", cb_exc)
 
         except Exception as exc:
             final_status = ScanStatus.ERROR

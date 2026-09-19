@@ -79,11 +79,15 @@ datas = [
     ("sentinel/config/rules/*.yar", "sentinel/config/rules"),
 ]
 
+# Native Rust acceleration shared library (if compiled)
+native_lib = PROJECT_ROOT / "sentinel" / "engine" / "sentinel_core.dll"
+binaries = [(str(native_lib), "sentinel/engine")] if native_lib.exists() else []
+
 # 1. Service Analysis & Executable
 a_service = Analysis(
     ["sentinel/service.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -110,7 +114,7 @@ exe_service = EXE(
 a_tray = Analysis(
     ["sentinel/ui/tray_app.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -137,7 +141,7 @@ exe_tray = EXE(
 a_gui = Analysis(
     ["sentinel/ui/dashboard.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -164,7 +168,7 @@ exe_gui = EXE(
 a_cli = Analysis(
     ["sentinel/cli_entry.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],

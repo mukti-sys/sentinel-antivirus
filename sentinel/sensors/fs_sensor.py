@@ -54,6 +54,11 @@ def shannon_entropy(data: bytes) -> float:
     """
     if not data:
         return 0.0
+    try:
+        from sentinel.engine.native_core import fast_entropy
+        return fast_entropy(data)
+    except Exception:
+        pass
     counts = [0] * 256
     for b in data:
         counts[b] += 1
