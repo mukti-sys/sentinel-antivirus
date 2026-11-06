@@ -61,12 +61,16 @@ EXECUTABLE_PROTECTIONS = frozenset({
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
 
-# Known JIT / Interpreter / Runtime process names (fast path)
+# Known JIT / Interpreter / Runtime / Electron / Overlay process names (fast path)
 _KNOWN_JIT_NAMES = frozenset({
     "powershell.exe", "pwsh.exe", "chrome.exe", "msedge.exe", "firefox.exe",
     "brave.exe", "python.exe", "pythonw.exe", "node.exe", "code.exe",
     "devenv.exe", "java.exe", "javaw.exe", "slack.exe", "discord.exe",
     "teams.exe", "spotify.exe", "robloxplayerbeta.exe", "roblox.exe",
+    "antigravity ide.exe", "antigravity.exe", "cursor.exe",
+    "steamwebhelper.exe", "steam.exe",
+    "epiconlineservicesuserh.exe", "epiconlineservicesuserh", "epicgameslauncher.exe",
+    "nvidia overlay.exe", "nvcontainer.exe", "geforcenow.exe",
 })
 
 # Known managed runtime and JIT modules (deep path for arbitrary .NET apps, Unity, Electron, etc.)
@@ -317,7 +321,13 @@ class MemoryScanner:
         if pid <= 4:
             return []
 
-        proc_name = process_name or f"pid_{pid}"
+        proc_name = process_name
+        if not proc_name or proc_name.startswith("pid_"):
+            try:
+                import psutil
+                proc_name = psutil.Process(pid).name()
+            except Exception:
+                proc_name = f"pid_{pid}"
 
         if self._is_windows:
             return self._scan_process_windows(pid, proc_name, max_scan_bytes)

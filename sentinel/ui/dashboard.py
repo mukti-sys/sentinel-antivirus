@@ -104,6 +104,7 @@ class SentinelDashboard(tk.Tk):
 
         self._configure_styles()
         self._build_layout()
+        self._start_telemetry_loop()
 
         # If launched with a target path (e.g. from Explorer right-click)
         if auto_scan_target:
@@ -234,7 +235,7 @@ class SentinelDashboard(tk.Tk):
         sidebar_footer.pack(side="bottom", fill="x", pady=15, padx=15)
         lbl_ver = tk.Label(
             sidebar_footer,
-            text="Sentinel v1.0 Consumer\nEngine: Kernel + YARA + ML",
+            text="Sentinel v2.2.0 Enterprise\nNative Core + EMBER AI + YARA",
             font=("Segoe UI", 7),
             bg=COLOR_SURFACE,
             fg=COLOR_TEXT_MUTED,
@@ -408,7 +409,117 @@ class SentinelDashboard(tk.Tk):
         )
         btn_quick.pack(anchor="w")
 
+        # Telemetry & Active Detection Engines Card
+        telemetry_frame = tk.Frame(frame, bg=COLOR_SURFACE, bd=1, relief="solid", highlightbackground=COLOR_CARD_BORDER)
+        telemetry_frame.pack(fill="x", pady=(15, 0), ipady=10, ipadx=10)
+
+        # Left: Live System Telemetry Counters
+        tele_left = tk.Frame(telemetry_frame, bg=COLOR_SURFACE)
+        tele_left.pack(side="left", fill="both", expand=True, padx=15)
+
+        tk.Label(
+            tele_left,
+            text="LIVE SYSTEM TELEMETRY",
+            font=("Segoe UI", 8, "bold"),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w")
+
+        metrics_row = tk.Frame(tele_left, bg=COLOR_SURFACE)
+        metrics_row.pack(anchor="w", pady=(4, 0))
+
+        self.lbl_tele_cpu = tk.Label(
+            metrics_row,
+            text="CPU: --%",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_SURFACE,
+            fg=COLOR_ACCENT_GREEN,
+        )
+        self.lbl_tele_cpu.pack(side="left", padx=(0, 15))
+
+        self.lbl_tele_ram = tk.Label(
+            metrics_row,
+            text="RAM: --% (-- GB)",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_PRIMARY,
+        )
+        self.lbl_tele_ram.pack(side="left", padx=(0, 15))
+
+        self.lbl_tele_threads = tk.Label(
+            metrics_row,
+            text="Processes: --",
+            font=("Segoe UI", 9),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_SECONDARY,
+        )
+        self.lbl_tele_threads.pack(side="left")
+
+        # Right: Detection Engine Architecture Badges
+        tele_right = tk.Frame(telemetry_frame, bg=COLOR_SURFACE)
+        tele_right.pack(side="right", padx=15)
+
+        tk.Label(
+            tele_right,
+            text="ACTIVE DETECTION ENGINES",
+            font=("Segoe UI", 8, "bold"),
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="e")
+
+        engines_row = tk.Frame(tele_right, bg=COLOR_SURFACE)
+        engines_row.pack(anchor="e", pady=(4, 0))
+
+        from sentinel.engine import native_core
+        native_active = native_core.is_native_available()
+        native_text = "⚡ Native Core (SIMD)" if native_active else "⚙️ Python Fallback"
+        native_color = COLOR_ACCENT_GREEN if native_active else COLOR_TEXT_MUTED
+
+        for eng_name, eng_color in [
+            (native_text, native_color),
+            ("🧠 EMBER AI (LightGBM)", COLOR_ACCENT_BLUE),
+            ("🎯 YARA Rules", COLOR_ACCENT_GREEN),
+            ("🌐 C2 Heuristics", COLOR_ACCENT_GREEN),
+        ]:
+            badge = tk.Label(
+                engines_row,
+                text=eng_name,
+                font=("Segoe UI", 8, "bold"),
+                bg="#1F2430",
+                fg=eng_color,
+                padx=8,
+                pady=3,
+            )
+            badge.pack(side="left", padx=3)
+
         return frame
+
+    def _start_telemetry_loop(self) -> None:
+        """Start recurring timer to update live system metrics."""
+        self._update_telemetry()
+
+    def _update_telemetry(self) -> None:
+        """Read real-time CPU and RAM utilization and update UI labels."""
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory()
+            used_gb = mem.used / (1024 ** 3)
+            total_gb = mem.total / (1024 ** 3)
+            num_proc = len(psutil.pids())
+
+            if hasattr(self, "lbl_tele_cpu") and self.lbl_tele_cpu.winfo_exists():
+                cpu_color = COLOR_ACCENT_GREEN if cpu < 70 else ("#F59E0B" if cpu < 90 else COLOR_ACCENT_RED)
+                self.lbl_tele_cpu.config(text=f"CPU: {cpu:.1f}%", fg=cpu_color)
+                self.lbl_tele_ram.config(text=f"RAM: {mem.percent:.1f}% ({used_gb:.1f}/{total_gb:.1f} GB)")
+                self.lbl_tele_threads.config(text=f"Processes: {num_proc}")
+        except Exception:
+            pass
+
+        # Schedule next update in 1500ms if window is still alive
+        try:
+            self.after(1500, self._update_telemetry)
+        except Exception:
+            pass
 
     def _create_card(
         self,
@@ -1810,7 +1921,7 @@ class SentinelDashboard(tk.Tk):
                 if pid <= 4 or pid == os.getpid():
                     continue
                 scanned_count += 1
-                threats = self.memory_scanner.scan_process(pid)
+                threats = self.memory_scanner.scan_process(pid, process_name=name)
                 for t in threats:
                     all_threats.append((pid, name, t))
                     if "RWX" in t.threat_type or t.protection == 0x40:
@@ -1848,7 +1959,7 @@ class SentinelDashboard(tk.Tk):
                     f"0x{t.base_address:012X}",
                     prot_str,
                     t.threat_type,
-                    f"{t.confidence:.1f}%",
+                    f"{t.confidence * 100:.0f}%",
                     t.evidence,
                 ),
             )
